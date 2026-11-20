@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Swipe Clean</title>
+  <meta name="description" content="Clear out your photos by swiping: right to keep, left to delete." />
+  <meta name="theme-color" content="#0e0e14" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Swipe Clean" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <img src="icons/icon.svg" alt="" width="28" height="28" />
+        <span>Swipe Clean</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="shareBtn" aria-label="Share app">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12M7 8l5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>
+        </button>
+        <button class="icon-btn" id="settingsBtn" aria-label="Settings">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="goal-card" id="goalCard">
+      <div class="ring" id="goalRing" style="--p:0">
+        <span id="goalPct">0%</span>
+      </div>
+      <div class="goal-text">
+        <div class="goal-title"><span id="todayCount">0</span> / <span id="goalCount">100</span> today</div>
+        <div class="goal-sub" id="goalSub">Swipe through your daily batch</div>
+      </div>
+      <button class="primary small" id="startBtn">Start</button>
+    </section>
+
+    <div class="install-hint hidden" id="installHint">
+      <span id="installText"></span>
+      <button class="link" id="installBtn">Install</button>
+      <button class="link muted" id="installDismiss" aria-label="Dismiss">✕</button>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="pending" role="tab">To review <b id="cPending">0</b></button>
+      <button class="tab" data-tab="kept" role="tab">Kept <b id="cKept">0</b></button>
+      <button class="tab" data-tab="trash" role="tab">Deleted <b id="cTrash">0</b></button>
+    </nav>
+
+    <div class="trash-bar hidden" id="trashBar">
+      <span id="trashInfo">Auto-deletes after 10 days</span>
+      <div>
+        <button class="link" id="restoreAllBtn">Restore all</button>
+        <button class="link danger" id="emptyTrashBtn">Delete all now</button>
+      </div>
+    </div>
+
+    <main id="gridWrap">
+      <div class="grid" id="grid"></div>
+      <div class="empty hidden" id="empty"></div>
+    </main>
+
+    <button class="fab" id="addBtn" aria-label="Add photos">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      <span>Add photos</span>
+    </button>
+    <input type="file" id="fileInput" accept="image/*" multiple hidden />
+  </div>
+
+  <!-- Swipe view -->
+  <div class="swiper hidden" id="swiper" aria-modal="true" role="dialog">
+    <div class="swiper-top">
+      <button class="icon-btn" id="swiperClose" aria-label="Back to grid">
+        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="swiper-progress">
+        <div class="bar"><i id="swiperBar"></i></div>
+        <span id="swiperCount">0 / 100 today</span>
+      </div>
+      <span class="swiper-left" id="swiperLeft"></span>
+    </div>
+    <div class="deck" id="deck"></div>
+    <div class="swiper-actions">
+      <button class="round trash" id="btnTrash" aria-label="Delete">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+      <button class="round undo" id="btnUndo" aria-label="Undo">
+        <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+      </button>
+      <button class="round keep" id="btnKeep" aria-label="Keep">
+        <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>
+      </button>
+    </div>
+    <p class="swiper-hint">Swipe right to keep · left to delete</p>
+  </div>
+
+  <!-- Photo viewer / actions for kept & deleted -->
+  <div class="sheet-backdrop hidden" id="viewer">
+    <div class="viewer">
+      <img id="viewerImg" alt="" />
+      <div class="viewer-meta" id="viewerMeta"></div>
+      <div class="viewer-actions" id="viewerActions"></div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="sheet-backdrop hidden" id="settings">
+    <form class="sheet" id="settingsForm">
+      <div class="sheet-head">
+        <h2>Settings</h2>
+        <button type="button" class="icon-btn" id="settingsClose" aria-label="Close">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+
+      <label class="field">
+        <span>Daily goal (photos per day)</span>
+        <input type="number" id="setGoal" min="1" max="5000" inputmode="numeric" required />
+      </label>
+
+      <label class="field">
+        <span>Keep deleted photos for (days)</span>
+        <input type="number" id="setDays" min="0" max="365" inputmode="numeric" required />
+        <small>After this, they're removed for good. 0 = remove immediately.</small>
+      </label>
+
+      <label class="field">
+        <span>Daily reminder time</span>
+        <input type="time" id="setTime" required />
+      </label>
+      <button type="button" class="secondary" id="reminderBtn">📅 Add daily reminder to my calendar</button>
+      <button type="button" class="secondary hidden" id="notifyBtn">🔔 Allow notifications</button>
+      <small class="note">Your calendar sends the reminder every day at this time — works on iPhone and Android, even when the app is closed.</small>
+
+      <div class="stats" id="statsBox"></div>
+
+      <button type="submit" class="primary">Save</button>
+      <button type="button" class="link danger" id="resetBtn">Remove everything from this app</button>
+    </form>
+  </div>
+
+  <div class="overlay hidden" id="importing">
+    <div class="importing-box">
+      <div class="spinner"></div>
+      <p id="importText">Adding photos…</p>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
