@@ -11,6 +11,14 @@ It installs from Safari or Chrome. There's no App Store, no build step, and noth
 - Deleted photos wait in **Deleted** for N days (default 10). You can restore them there, and after that they're removed for good.
 - Works offline once loaded. Share button sends the link to friends.
 
+**Live:** https://aayushmk.github.io/swipe-clean/
+
+## Updating the live site
+GitHub Pages serves the `gh-pages` branch. After changing files, bump `VERSION` in `sw.js`, commit, then:
+```bash
+git push origin main main:gh-pages
+```
+
 ## Run locally
 ```bash
 python3 -m http.server 8765
