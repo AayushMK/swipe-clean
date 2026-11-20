@@ -1,47 +1,63 @@
 # Swipe Clean
 
-A web app (PWA) for cleaning up photos Tinder-style: swipe right to keep, left to delete.
-It installs from Safari or Chrome. There's no App Store, no build step, and nothing to compile.
+Clean up your photos Tinder-style: swipe right to keep, left to delete.
+
+One codebase (`www/`) ships two ways:
+
+| | **Native app** (iPhone / Android) | **Website** (any browser) |
+|---|---|---|
+| Photos | Your whole photo library, automatically | Photos you pick with the photo picker (copies) |
+| Delete | **Really deletes from your phone** | Removes only from the app |
+| Daily reminder | Real notification every day | Calendar event (.ics) |
+| Install | Xcode (iPhone) / APK (Android) | Safari or Chrome → Add to Home Screen |
+
+**Live website:** https://aayushmk.github.io/swipe-clean/
 
 ## Features
-- Grid of photos still to review. Tap one to open the swipe view at that photo.
-- Swipe right or ✓ to keep. Swipe left or ✕ to delete. ↶ undoes. Arrow keys work on desktop.
-- Daily goal (default 100) with a progress ring and a streak.
-- Daily reminder: Settings → "Add daily reminder to my calendar" adds a repeating calendar event.
-- Deleted photos wait in **Deleted** for N days (default 10). You can restore them there, and after that they're removed for good.
-- Works offline once loaded. Share button sends the link to friends.
+- Grid of photos to review. Tap one to start swiping from that photo.
+- Swipe right or ✓ to keep. Swipe left or ✕ to delete. ↶ undoes.
+- Daily goal (default 100) with progress ring and streak; daily reminder.
+- **Deleted** holds photos for N days (default 10) so you can restore them. After that:
+  - **iPhone:** iOS asks “Allow Swipe Clean to delete N photos?” (Apple requires this for every delete), then the photos move to the Photos app’s *Recently Deleted* for 30 days.
+  - **Android 11+:** Android shows a similar confirmation and deletes them.
+  - The app asks automatically when you open it. If you tap “Don’t Allow”, a red banner lets you try again later.
 
-**Live:** https://aayushmk.github.io/swipe-clean/
-
-## Updating the live site
-GitHub Pages serves the `gh-pages` branch. After changing files, bump `VERSION` in `sw.js`, commit, then:
-```bash
-git push origin main main:gh-pages
+## Project layout
+```
+www/            the app (HTML/CSS/JS) — used by the website AND the native apps
+ios/            Xcode project (Capacitor). Native code: ios/App/App/PhotoLibraryPlugin.swift
+android/        Android Studio project. Native code: android/app/src/main/java/.../PhotoLibraryPlugin.java
+assets/         source icon used to generate app icons/splash
 ```
 
-## Run locally
+## Install on your iPhone
+Needs a Mac with Xcode and a free Apple ID.
+1. `npm install` then `npm run ios` (copies `www/` into the app and opens Xcode).
+2. In Xcode: click **App** in the left sidebar → **Signing & Capabilities** → **Team** → pick your Apple ID (add it under Xcode → Settings → Accounts if needed).
+3. Plug in your iPhone (unlock it, tap **Trust**), pick it at the top of Xcode, press **▶ Run**.
+4. First time only, on the iPhone: Settings → General → VPN & Device Management → trust your developer certificate. Also turn on Settings → Privacy & Security → **Developer Mode** if asked.
+
+With a free Apple ID the app stops opening after 7 days. Re-run from Xcode to refresh it.
+To share with other iPhone users you need the paid Apple Developer Program ($99/year) and TestFlight or the App Store.
+
+## Install on Android
+Needs Android Studio (includes the Android SDK and Java).
+1. `npm install` then `npm run android` (opens Android Studio).
+2. **Run ▶** to a connected phone, or **Build → Build App Bundle(s) / APK(s) → Build APK(s)**.
+3. Share the `.apk` file with anyone. They open it and allow “Install unknown apps”.
+
+## After changing the app
 ```bash
-python3 -m http.server 8765
+npm run sync                      # copy www/ into the iOS and Android projects
 ```
-Then open http://localhost:8765.
+Then rebuild from Xcode / Android Studio.
 
-## Put it online (needed to install on phones and share)
-It's just static files, so any HTTPS host works:
-- **Netlify Drop**: drag this folder onto https://app.netlify.com/drop
-- **GitHub Pages**: push this folder to a repo, then Settings → Pages → deploy from branch
-- **Vercel / Cloudflare Pages**: import the folder; there's no build command
+Website: bump `VERSION` in `www/sw.js`, commit, then publish `www/`:
+```bash
+git push origin `git subtree split --prefix www main`:gh-pages --force
+```
 
-Then on the phone, open the URL:
-- **iPhone (Safari)**: Share → Add to Home Screen
-- **Android (Chrome)**: tap "Install" in the app, or ⋮ → Install app
-
-After changing any file, bump `VERSION` in `sw.js` so installed copies update.
-
-## Important limitation of web apps
-Browsers don't let websites read or delete your phone's photo library. So:
-- You **pick** photos to review with the system photo picker. The app works on copies stored in the browser.
-- "Deleted" removes the photo **from this app**, not from your camera roll. The original still has to be deleted in the Photos / Gallery app.
-
-Removing photos from the real library needs a native wrapper. This code can be wrapped with
-[Capacitor](https://capacitorjs.com) plus a photo-library plugin to get that, but then it's installed
-through the App Store / TestFlight or as an Android APK, not from Safari.
+## Run the website locally
+```bash
+python3 -m http.server 8765 -d www
+```

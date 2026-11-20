@@ -55,6 +55,11 @@
       <button class="tab" data-tab="trash" role="tab">Deleted <b id="cTrash">0</b></button>
     </nav>
 
+    <div class="expired-bar hidden" id="expiredBar">
+      <span id="expiredText"></span>
+      <button class="primary small" id="expiredBtn">Delete from phone</button>
+    </div>
+
     <div class="trash-bar hidden" id="trashBar">
       <span id="trashInfo">Auto-deletes after 10 days</span>
       <div>
@@ -65,6 +70,7 @@
 
     <main id="gridWrap">
       <div class="grid" id="grid"></div>
+      <div id="gridEnd"></div>
       <div class="empty hidden" id="empty"></div>
     </main>
 
@@ -129,7 +135,7 @@
       <label class="field">
         <span>Keep deleted photos for (days)</span>
         <input type="number" id="setDays" min="0" max="365" inputmode="numeric" required />
-        <small>After this, they're removed for good. 0 = remove immediately.</small>
+        <small id="daysNote">After this, they're removed for good. 0 = remove immediately.</small>
       </label>
 
       <label class="field">
@@ -138,7 +144,7 @@
       </label>
       <button type="button" class="secondary" id="reminderBtn">📅 Add daily reminder to my calendar</button>
       <button type="button" class="secondary hidden" id="notifyBtn">🔔 Allow notifications</button>
-      <small class="note">Your calendar sends the reminder every day at this time — works on iPhone and Android, even when the app is closed.</small>
+      <small class="note" id="reminderNote">Your calendar sends the reminder every day at this time — works on iPhone and Android, even when the app is closed.</small>
 
       <div class="stats" id="statsBox"></div>
 
@@ -156,6 +162,7 @@
 
   <div class="toast hidden" id="toast"></div>
 
+  <script src="capacitor.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

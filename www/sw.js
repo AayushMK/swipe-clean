@@ -1,12 +1,13 @@
 // Offline support: cache the app shell, serve it cache-first.
 // Bump VERSION whenever you change any app file so users get the update.
-const VERSION = 'swipeclean-v1';
+const VERSION = 'swipeclean-v2';
 const SHELL = [
   './',
   './index.html',
   './styles.css',
   './app.js',
   './db.js',
+  './capacitor.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-180.png',

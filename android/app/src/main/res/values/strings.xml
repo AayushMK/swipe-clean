@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Swipe Clean</string>
+    <string name="title_activity_main">Swipe Clean</string>
+    <string name="package_name">com.aayushmk.swipeclean</string>
+    <string name="custom_url_scheme">com.aayushmk.swipeclean</string>
+</resources>

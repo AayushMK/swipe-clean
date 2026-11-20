@@ -195,3 +195,16 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   display: flex; gap: 12px; align-items: center;
 }
 .toast button { color: var(--accent); font-weight: 700; }
+
+/* Native app (Capacitor): library is read automatically */
+.native .fab, .native .install-hint { display: none !important; }
+.native #app { padding-bottom: calc(var(--safe-bottom) + 24px); }
+#gridEnd { height: 1px; }
+.expired-bar {
+  display: flex; align-items: center; gap: 10px; margin: 0 0 10px; padding: 10px 12px;
+  background: rgba(255, 77, 109, .12); border: 1px solid rgba(255, 77, 109, .4); border-radius: 14px; font-size: 14px;
+}
+.expired-bar span { flex: 1; }
+.expired-bar .primary { background: var(--trash); }
+.field input[type="time"] { -webkit-appearance: none; appearance: none; min-height: 48px; text-align: left; display: block; min-width: 0; max-width: 100%; }
+.field input[type="time"]::-webkit-date-and-time-value { text-align: left; }
