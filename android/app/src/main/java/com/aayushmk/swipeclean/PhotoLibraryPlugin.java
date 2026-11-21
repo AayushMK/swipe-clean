@@ -271,6 +271,31 @@ public class PhotoLibraryPlugin extends Plugin {
         }
     }
 
+    /** Total size of photos and videos, plus the phone's storage. */
+    @PluginMethod
+    public void getStorageInfo(PluginCall call) {
+        getBridge().execute(() -> {
+            long[] photos = sumSizes(IMAGES), videos = sumSizes(VIDEOS);
+            android.os.StatFs fs = new android.os.StatFs(android.os.Environment.getDataDirectory().getPath());
+            JSObject ret = new JSObject();
+            ret.put("photoBytes", photos[0]);
+            ret.put("photoCount", photos[1]);
+            ret.put("videoBytes", videos[0]);
+            ret.put("videoCount", videos[1]);
+            ret.put("totalBytes", fs.getTotalBytes());
+            ret.put("freeBytes", fs.getAvailableBytes());
+            call.resolve(ret);
+        });
+    }
+
+    private long[] sumSizes(Uri collection) {
+        long bytes = 0, count = 0;
+        try (Cursor c = getContext().getContentResolver().query(collection, new String[] { MediaStore.MediaColumns.SIZE }, null, null, null)) {
+            if (c != null) while (c.moveToNext()) { bytes += c.getLong(0); count++; }
+        } catch (Exception ignored) { }
+        return new long[] { bytes, count };
+    }
+
     @PluginMethod
     public void openSettings(PluginCall call) {
         Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,

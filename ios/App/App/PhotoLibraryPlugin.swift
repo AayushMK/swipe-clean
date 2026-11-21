@@ -26,6 +26,7 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "deletePhotos", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openSettings", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openPhotosApp", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getStorageInfo", returnType: CAPPluginReturnPromise),
     ]
 
     private let imageManager = PHCachingImageManager()
@@ -219,6 +220,34 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
                     call.resolve(["deleted": false, "error": error?.localizedDescription ?? "Cancelled"])
                 }
             }
+        }
+    }
+
+    /// Total size of all photos and videos in the library, plus the phone's storage.
+    /// Sizes are the full originals (with iCloud "Optimize iPhone Storage" the phone may hold less).
+    @objc func getStorageInfo(_ call: CAPPluginCall) {
+        DispatchQueue.global(qos: .utility).async {
+            var photoBytes: Int64 = 0, videoBytes: Int64 = 0, photoCount = 0, videoCount = 0
+            let opts = PHFetchOptions()
+            opts.predicate = NSPredicate(format: "mediaType == %d || mediaType == %d",
+                                         PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+            PHAsset.fetchAssets(with: opts).enumerateObjects { a, _, _ in
+                autoreleasepool {
+                    let b = Self.bytes(of: a)
+                    if a.mediaType == .video { videoBytes += b; videoCount += 1 } else { photoBytes += b; photoCount += 1 }
+                }
+            }
+            var total: Int64 = 0, free: Int64 = 0
+            let keys: Set<URLResourceKey> = [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]
+            if let v = try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: keys) {
+                total = Int64(v.volumeTotalCapacity ?? 0)
+                free = v.volumeAvailableCapacityForImportantUsage ?? 0
+            }
+            call.resolve([
+                "photoBytes": photoBytes, "videoBytes": videoBytes,
+                "photoCount": photoCount, "videoCount": videoCount,
+                "totalBytes": total, "freeBytes": free,
+            ])
         }
     }
 
