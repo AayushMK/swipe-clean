@@ -253,3 +253,32 @@ html, body, button, .cell, .card { touch-action: manipulation; }
 }
 .secondary-pill:active { transform: scale(.96); }
 .toast button { white-space: nowrap; flex: none; }
+
+/* Storage dashboard */
+.storage-card { margin-top: 10px; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.storage-top { display: flex; justify-content: space-between; gap: 12px; }
+.storage-label { font-size: 12px; color: var(--muted); }
+.storage-value { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; margin-top: 2px; }
+.cleaned { text-align: right; }
+.cleaned-value { font-size: 22px; font-weight: 800; color: var(--keep); margin-top: 2px; }
+.storage-bar { display: flex; height: 10px; margin: 12px 0 8px; border-radius: 6px; overflow: hidden; background: var(--panel-2); }
+.storage-bar i { display: block; height: 100%; transition: width .4s; }
+.storage-bar .photos, .dot.photos { background: var(--accent); }
+.storage-bar .videos, .dot.videos { background: #ffb547; }
+.storage-bar .other { background: #5a5a70; }
+.storage-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text); margin-top: 8px; }
+.storage-legend span { display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.storage-sub { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+.storage-sub b { color: var(--text); }
+
+/* Tab change by swiping */
+@keyframes slideFromRight { from { transform: translateX(40px); opacity: .3; } to { transform: none; opacity: 1; } }
+@keyframes slideFromLeft { from { transform: translateX(-40px); opacity: .3; } to { transform: none; opacity: 1; } }
+#gridWrap.slide-from-right { animation: slideFromRight .22s ease-out; }
+#gridWrap.slide-from-left { animation: slideFromLeft .22s ease-out; }
+
+/* No accidental text selection while swiping */
+#app, .swiper { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+#app input, .sheet input { -webkit-user-select: text; user-select: text; }
+#app img { -webkit-user-drag: none; user-drag: none; }

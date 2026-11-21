@@ -72,7 +72,15 @@ function fmtBytes(b) {
   return `${b < 10 && i ? b.toFixed(1) : Math.round(b)} ${u[i]}`;
 }
 const freed = () => Number(localStorage.getItem('freedBytes') || 0);
-const addFreed = (n) => localStorage.setItem('freedBytes', String(freed() + (n || 0)));
+const freedDaily = () => JSON.parse(localStorage.getItem('freedDaily') || '{}');
+const freedToday = () => freedDaily()[dayKey()] || 0;
+function addFreed(n) {
+  if (!n) return;
+  localStorage.setItem('freedBytes', String(freed() + n));
+  const d = freedDaily();
+  d[dayKey()] = (d[dayKey()] || 0) + n;
+  localStorage.setItem('freedDaily', JSON.stringify(d));
+}
 
 function forget(ids) {
   ids.forEach((id) => {
@@ -145,6 +153,7 @@ async function removeForever(ids) {
     try { res = await Lib.deletePhotos({ ids }); } catch (e) { res = { deleted: false }; }
     if (!res.deleted) return false;
     addFreed(res.bytes);
+    setTimeout(refreshStorage, 500);
   } else {
     const gone = new Set(ids);
     addFreed(photos.filter((p) => gone.has(p.id)).reduce((a, p) => a + (p.size || 0), 0));
@@ -329,7 +338,7 @@ function makeCell(p) {
   cell.className = 'cell';
   cell.dataset.id = p.id;
   const img = document.createElement('img');
-  img.alt = ''; img.decoding = 'async';
+  img.alt = ''; img.decoding = 'async'; img.draggable = false;
   const now = thumbUrlNow(p);
   if (now) img.src = now;
   else if (!NATIVE) {
@@ -399,7 +408,104 @@ function renderGrid() {
     : `Removed for good after ${plural(settings.retentionDays, 'day')}`;
 }
 
-function render() { renderCounts(); renderGrid(); }
+function render() { renderCounts(); renderStorage(); renderGrid(); }
+
+/* ---------- Storage dashboard ---------- */
+
+let storage = JSON.parse(localStorage.getItem('storageInfo') || 'null');
+let storageLoading = false;
+
+async function refreshStorage() {
+  if (!NATIVE || storageLoading || !(access === 'granted' || access === 'limited')) return;
+  storageLoading = true;
+  renderStorage();
+  try {
+    storage = await Lib.getStorageInfo();
+    localStorage.setItem('storageInfo', JSON.stringify(storage));
+  } catch (e) { console.error(e); }
+  storageLoading = false;
+  renderStorage();
+}
+
+function renderStorage() {
+  const zero = (b) => fmtBytes(b) || '0 MB';
+  $('cleanedToday').textContent = zero(freedToday());
+  $('cleanedAll').textContent = zero(freed());
+
+  // Website: only what was added to the app. Native: the phone's whole library.
+  let s = storage;
+  if (!NATIVE) {
+    s = { photoBytes: 0, videoBytes: 0, photoCount: 0, videoCount: 0, totalBytes: 0, freeBytes: 0 };
+    for (const p of photos) {
+      if (isVideo(p)) { s.videoBytes += p.size || 0; s.videoCount++; } else { s.photoBytes += p.size || 0; s.photoCount++; }
+    }
+  }
+  $('storageLabel').textContent = NATIVE ? 'Photos & videos on this phone' : 'Photos & videos in Swipe Clean';
+  if (!s) {
+    $('storageValue').textContent = storageLoading ? 'Calculating…' : '—';
+    $('storageBar').classList.add('hidden');
+    $('storageLegend').textContent = '';
+    $('storageSub').textContent = '';
+    return;
+  }
+  const media = s.photoBytes + s.videoBytes;
+  $('storageValue').textContent = zero(media) + (storageLoading ? ' · updating…' : '');
+  $('storageLegend').innerHTML =
+    `<span><i class="dot photos"></i>Photos ${zero(s.photoBytes)} · ${s.photoCount.toLocaleString()}</span>` +
+    `<span><i class="dot videos"></i>Videos ${zero(s.videoBytes)} · ${s.videoCount.toLocaleString()}</span>`;
+
+  const bar = $('storageBar');
+  if (s.totalBytes) {
+    const used = Math.max(0, s.totalBytes - s.freeBytes);
+    const pct = (b) => `${Math.max(0, Math.min(100, (b / s.totalBytes) * 100))}%`;
+    const other = Math.max(0, used - media);
+    bar.querySelector('.photos').style.width = pct(Math.min(s.photoBytes, used));
+    bar.querySelector('.videos').style.width = pct(Math.min(s.videoBytes, Math.max(0, used - s.photoBytes)));
+    bar.querySelector('.other').style.width = pct(other);
+    bar.classList.remove('hidden');
+    $('storageSub').textContent =
+      `${Math.round((media / s.totalBytes) * 100)}% of your ${zero(s.totalBytes)} phone · ${zero(s.freeBytes)} free` +
+      (media > used ? ' · sizes include iCloud originals' : '');
+  } else {
+    bar.classList.add('hidden');
+    $('storageSub').textContent = '';
+  }
+}
+
+/* ---------- Swipe left/right on the main screen to change tabs ---------- */
+
+const TAB_ORDER = ['pending', 'kept', 'trash'];
+function switchTabBy(step) {
+  const i = TAB_ORDER.indexOf(tab) + step;
+  if (i < 0 || i >= TAB_ORDER.length) return;
+  setTab(TAB_ORDER[i]);
+  const g = $('gridWrap');
+  g.classList.remove('slide-from-left', 'slide-from-right');
+  void g.offsetWidth;                       // restart the animation
+  g.classList.add(step > 0 ? 'slide-from-right' : 'slide-from-left');
+}
+function setupTabSwipe() {
+  const area = $('app');
+  let x0 = 0, y0 = 0, t0 = 0, tracking = false;
+  const begin = (x, y, target) => {
+    if (!$('swiper').classList.contains('hidden') || target.closest('input, .tabs')) return;
+    tracking = true; x0 = x; y0 = y; t0 = performance.now();
+  };
+  const finish = (x, y) => {
+    if (!tracking) return;
+    tracking = false;
+    const dx = x - x0, dy = y - y0;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy) && performance.now() - t0 < 700) {
+      switchTabBy(dx < 0 ? 1 : -1);        // swipe left → next tab, right → previous
+    }
+  };
+  area.addEventListener('touchstart', (e) => { if (e.touches.length === 1) begin(e.touches[0].clientX, e.touches[0].clientY, e.target); }, { passive: true });
+  area.addEventListener('touchend', (e) => finish(e.changedTouches[0].clientX, e.changedTouches[0].clientY), { passive: true });
+  area.addEventListener('touchcancel', () => { tracking = false; }, { passive: true });
+  // mouse (desktop)
+  area.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') begin(e.clientX, e.clientY, e.target); });
+  area.addEventListener('pointerup', (e) => { if (e.pointerType === 'mouse') finish(e.clientX, e.clientY); });
+}
 
 function setTab(t) {
   tab = t;
@@ -993,6 +1099,7 @@ function deletedToast(msg) {
 
 function bind() {
   setupEdgeBack();
+  setupTabSwipe();
   $('addBtn').onclick = () => $('fileInput').click();
   $('fileInput').onchange = async (e) => { await importFiles(e.target.files); e.target.value = ''; };
   $('startBtn').onclick = () => openSwiper();
@@ -1096,7 +1203,7 @@ async function init() {
       ? 'After this, they\'re deleted from your iPhone (iOS keeps them in Recently Deleted for 30 more days). 0 = delete right away.'
       : 'After this, they\'re deleted from your phone. 0 = delete right away.';
     try { ({ status: access } = await Lib.requestAccess()); } catch (e) { console.error('PhotoLibrary.requestAccess failed:', e?.code, e?.message || e); access = 'denied'; }
-    if (access === 'granted' || access === 'limited') await syncNativeLibrary();
+    if (access === 'granted' || access === 'limited') { await syncNativeLibrary(); refreshStorage(); }
   } else {
     photos = await db.getAllMeta();
   }
