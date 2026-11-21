@@ -444,6 +444,7 @@ function openSwiper(startId) {
 function closeSwiper(fromPop = false) {
   if ($('swiper').classList.contains('hidden')) return;
   $('swiper').classList.add('hidden');
+  $('swiper').style.backgroundColor = '';
   document.body.style.overflow = '';
   swipe.urls.forEach((u) => { if (u?.startsWith('blob:')) URL.revokeObjectURL(u); });
   swipe.urls.clear();
@@ -569,43 +570,140 @@ function renderDeck() {
   if (after && !isVideo(after)) fullUrl(after);
 }
 
+// Calls start/move/end with {x, y}. Uses touch events on phones (most reliable
+// on iOS) and pointer events for mouse/trackpad.
+function onDrag(el, { start, move, end }, capture = false) {
+  if ('ontouchstart' in window) {
+    el.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (start({ x: t.clientX, y: t.clientY }, e) === false) return;
+      const id = t.identifier;
+      const find = (list) => [...list].find((x) => x.identifier === id);
+      const onMove = (ev) => { const p = find(ev.changedTouches); if (p) { ev.preventDefault(); move({ x: p.clientX, y: p.clientY }); } };
+      const onEnd = (ev) => {
+        if (!find(ev.changedTouches)) return;
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onEnd);
+        window.removeEventListener('touchcancel', onEnd);
+        end();
+      };
+      window.addEventListener('touchmove', onMove, { passive: false });
+      window.addEventListener('touchend', onEnd);
+      window.addEventListener('touchcancel', onEnd);
+    }, { passive: true, capture });
+  }
+  {
+    el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'touch' && 'ontouchstart' in window) return;   // handled above
+      if (start({ x: e.clientX, y: e.clientY }, e) === false) return;
+      el.setPointerCapture(e.pointerId);
+      const onMove = (ev) => move({ x: ev.clientX, y: ev.clientY });
+      const onEnd = () => {
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerup', onEnd);
+        el.removeEventListener('pointercancel', onEnd);
+        end();
+      };
+      el.addEventListener('pointermove', onMove);
+      el.addEventListener('pointerup', onEnd);
+      el.addEventListener('pointercancel', onEnd);
+    }, { capture });
+  }
+}
+
 function attachDrag(card) {
-  let x0 = 0, y0 = 0, dx = 0, dy = 0, t0 = 0, active = false;
+  let x0 = 0, y0 = 0, dx = 0, dy = 0, t0 = 0;
+  let mode = null;   // decided after a few px: 'side' (keep/delete) or 'down' (back to grid)
   const keepStamp = card.querySelector('.stamp.keep');
   const trashStamp = card.querySelector('.stamp.trash');
+  const swiperEl = $('swiper');
 
-  card.addEventListener('pointerdown', (e) => {
-    active = true; x0 = e.clientX; y0 = e.clientY; dx = dy = 0; t0 = performance.now();
-    card.setPointerCapture(e.pointerId);
-    card.style.transition = 'none';
+  onDrag(card, {
+    start: (p, e) => {
+      if (edgeBack.active || e.__edge) return false;
+      mode = null; x0 = p.x; y0 = p.y; dx = dy = 0; t0 = performance.now();
+      card.style.transition = 'none';
+    },
+    move: (p) => {
+      dx = p.x - x0; dy = p.y - y0;
+      if (!mode && Math.hypot(dx, dy) > 10) mode = dy > Math.abs(dx) ? 'down' : 'side';
+      if (mode === 'down') {
+        const d = Math.max(0, dy);
+        card.style.transform = `translate(${dx * 0.3}px, ${d}px) scale(${Math.max(0.8, 1 - d / 1200)})`;
+        swiperEl.style.backgroundColor = `rgba(14,14,20,${Math.max(0.35, 1 - d / 500)})`;
+        return;
+      }
+      card.style.transform = `translate(${dx}px, ${dy * 0.4}px) rotate(${dx / 18}deg)`;
+      keepStamp.style.opacity = Math.max(0, Math.min(1, dx / 90));
+      trashStamp.style.opacity = Math.max(0, Math.min(1, -dx / 90));
+    },
+    end: () => {
+      const dt = Math.max(1, performance.now() - t0);
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8 && dt < 400) {
+        card.style.transform = '';
+        tapCard(card);
+        return;
+      }
+      if (mode === 'down') {
+        if (dy > 120 || (dy / dt > 0.5 && dy > 40)) {
+          card.style.transition = 'transform .22s ease-in, opacity .22s';
+          card.style.transform = `translate(${dx * 0.3}px, ${window.innerHeight}px) scale(.8)`;
+          card.style.opacity = '0';
+          card.querySelector('video')?.pause();
+          setTimeout(() => closeSwiper(), 200);
+        } else {
+          card.style.transition = 'transform .25s cubic-bezier(.2,.9,.3,1.2)';
+          card.style.transform = '';
+          swiperEl.style.backgroundColor = '';
+        }
+        return;
+      }
+      const v = dx / dt; // px per ms
+      const threshold = Math.min(120, card.offsetWidth * 0.28);
+      if (dx > threshold || (v > 0.5 && dx > 30)) decide('kept');
+      else if (dx < -threshold || (v < -0.5 && dx < -30)) decide('trash');
+      else {
+        card.style.transition = 'transform .25s cubic-bezier(.2,.9,.3,1.2)';
+        card.style.transform = '';
+        keepStamp.style.opacity = trashStamp.style.opacity = 0;
+      }
+    },
   });
-  card.addEventListener('pointermove', (e) => {
-    if (!active) return;
-    dx = e.clientX - x0; dy = e.clientY - y0;
-    card.style.transform = `translate(${dx}px, ${dy * 0.4}px) rotate(${dx / 18}deg)`;
-    keepStamp.style.opacity = Math.max(0, Math.min(1, dx / 90));
-    trashStamp.style.opacity = Math.max(0, Math.min(1, -dx / 90));
-  });
-  const end = () => {
-    if (!active) return;
-    active = false;
-    if (Math.abs(dx) < 8 && Math.abs(dy) < 8 && performance.now() - t0 < 400) {
-      card.style.transform = '';
-      tapCard(card);
-      return;
-    }
-    const v = dx / Math.max(1, performance.now() - t0); // px per ms
-    const threshold = Math.min(120, card.offsetWidth * 0.28);
-    if (dx > threshold || (v > 0.5 && dx > 30)) decide('kept');
-    else if (dx < -threshold || (v < -0.5 && dx < -30)) decide('trash');
-    else {
-      card.style.transition = 'transform .25s cubic-bezier(.2,.9,.3,1.2)';
-      card.style.transform = '';
-      keepStamp.style.opacity = trashStamp.style.opacity = 0;
-    }
-  };
-  card.addEventListener('pointerup', end);
-  card.addEventListener('pointercancel', end);
+}
+
+// iPhone-style back: swipe in from the left edge of the screen.
+const edgeBack = { active: false };
+function setupEdgeBack() {
+  const el = $('swiper');
+  const EDGE = 24;
+  let x0 = 0, dx = 0, t0 = 0;
+  // The swipe view never scrolls: stop iOS from turning drags into page scrolling.
+  el.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+  onDrag(el, {
+    start: (p, e) => {
+      if (p.x > EDGE || el.classList.contains('hidden')) return false;
+      e.__edge = true;                 // the card ignores this touch
+      edgeBack.active = true; x0 = p.x; dx = 0; t0 = performance.now();
+      el.style.transition = 'none';
+    },
+    move: (p) => {
+      dx = Math.max(0, p.x - x0);
+      el.style.transform = `translateX(${dx}px)`;
+      el.style.boxShadow = '-12px 0 30px rgba(0,0,0,.5)';
+    },
+    end: () => {
+      edgeBack.active = false;
+      const v = dx / Math.max(1, performance.now() - t0);
+      const go = dx > window.innerWidth * 0.3 || (v > 0.5 && dx > 40);
+      el.style.transition = 'transform .22s ease-out';
+      el.style.transform = go ? `translateX(${window.innerWidth}px)` : '';
+      setTimeout(() => {
+        el.style.transition = el.style.transform = el.style.boxShadow = '';
+        if (go) closeSwiper();
+      }, 220);
+    },
+  }, true);   // capture phase: runs before the card's handler
 }
 
 let deciding = false;
@@ -874,6 +972,7 @@ function toast(msg) {
 /* ---------- Wire up ---------- */
 
 function bind() {
+  setupEdgeBack();
   $('addBtn').onclick = () => $('fileInput').click();
   $('fileInput').onchange = async (e) => { await importFiles(e.target.files); e.target.value = ''; };
   $('startBtn').onclick = () => openSwiper();
