@@ -25,6 +25,7 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getInfo", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deletePhotos", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openSettings", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "openPhotosApp", returnType: CAPPluginReturnPromise),
     ]
 
     private let imageManager = PHCachingImageManager()
@@ -218,6 +219,14 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
                     call.resolve(["deleted": false, "error": error?.localizedDescription ?? "Cancelled"])
                 }
             }
+        }
+    }
+
+    /// Opens Apple's Photos app (there is no public link straight to Recently Deleted).
+    @objc func openPhotosApp(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard let url = URL(string: "photos-redirect://") else { return call.resolve(["opened": false]) }
+            UIApplication.shared.open(url) { ok in call.resolve(["opened": ok]) }
         }
     }
 

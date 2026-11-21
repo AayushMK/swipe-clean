@@ -10,6 +10,7 @@ const NATIVE = !!Cap?.isNativePlatform?.();
 const registerPlugin = window.capacitorExports?.registerPlugin || Cap?.registerPlugin;
 const Lib = NATIVE ? registerPlugin('PhotoLibrary') : null;
 const Notify = NATIVE ? registerPlugin('LocalNotifications') : null;
+const IOS = NATIVE && Cap.getPlatform?.() === 'ios';
 const SITE_URL = 'https://aayushmk.github.io/swipe-clean/';
 const REMINDER_ID = 1001;
 
@@ -392,6 +393,7 @@ function renderGrid() {
   }
 
   $('trashBar').classList.toggle('hidden', tab !== 'trash' || !gridList.length);
+  $('photosTrashHint').classList.toggle('hidden', !IOS || tab !== 'trash');
   $('trashInfo').textContent = NATIVE
     ? `Deleted from your phone after ${plural(settings.retentionDays, 'day')}`
     : `Removed for good after ${plural(settings.retentionDays, 'day')}`;
@@ -783,7 +785,8 @@ async function openViewer(p) {
     add('↩︎ Restore (keep it)', 'keep', () => setStatus(p, 'kept'));
     add('Put back in To review', '', () => setStatus(p, 'pending'));
     add(NATIVE ? 'Delete from phone now' : 'Delete forever now', 'trash', async () => {
-      if (!(await removeForever([p.id]))) toast('Not deleted');
+      if (await removeForever([p.id])) deletedToast(`Deleted ${itemWord(1, [p])}`);
+      else toast('Not deleted');
     });
   } else {
     add('Move to Deleted', 'trash', () => setStatus(p, 'trash'));
@@ -961,12 +964,29 @@ function setupInstallHint() {
 /* ---------- Toast ---------- */
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, action) {
   const t = $('toast');
   t.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.onclick = () => { t.classList.add('hidden'); action.fn(); };
+    t.append(b);
+  }
   t.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add('hidden'), 3200);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), action ? 6000 : 3200);
+}
+
+// iPhone: deleted items sit in Photos' "Recently Deleted" for 30 days. Apps can't
+// empty it, so offer a shortcut to the Photos app.
+async function openPhotosApp() {
+  let opened = false;
+  try { ({ opened } = await Lib.openPhotosApp()); } catch { /* ignore */ }
+  if (!opened) toast('Open Photos → Collections → Utilities → Recently Deleted');
+}
+function deletedToast(msg) {
+  toast(msg, IOS ? { label: 'Empty in Photos', fn: openPhotosApp } : null);
 }
 
 /* ---------- Wire up ---------- */
@@ -1015,12 +1035,12 @@ function bind() {
     if (!NATIVE && !confirm(`Remove ${itemWord(ids.length, list)} for good? This can't be undone.`)) return;
     const ok = await removeForever(ids);
     render();
-    toast(ok ? `Deleted ${itemWord(ids.length, list)}` : 'Not deleted');
+    if (ok) deletedToast(`Deleted ${itemWord(ids.length, list)}`); else toast('Not deleted');
   };
   $('expiredBtn').onclick = async () => {
     const n = await purgeExpired({ force: true });
     render();
-    if (n) toast(`Deleted ${plural(n, 'item')} from your phone`);
+    if (n) deletedToast(`Deleted ${plural(n, 'item')} from your phone`);
   };
 
   $('settingsBtn').onclick = openSettings;
@@ -1045,6 +1065,7 @@ function bind() {
   };
 
   $('shareBtn').onclick = shareApp;
+  $('openPhotosBtn').onclick = openPhotosApp;
   $('installBtn').onclick = async () => {
     if (!installEvent) return;
     installEvent.prompt();
@@ -1082,7 +1103,7 @@ async function init() {
   render();
   const purged = await purgeExpired();
   render();
-  if (purged) toast(`${plural(purged, 'item')} passed ${settings.retentionDays} days in Deleted and ${purged === 1 ? 'was' : 'were'} removed`);
+  if (purged) deletedToast(`${plural(purged, 'item')} passed ${settings.retentionDays} days in Deleted and ${purged === 1 ? 'was' : 'were'} removed`);
   else if (byStatus('pending').length && todayCount() < settings.dailyGoal && todayCount() > 0) {
     toast(`${settings.dailyGoal - todayCount()} left for today's goal`);
   }
