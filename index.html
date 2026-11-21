@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>Swipe Clean</title>
   <meta name="description" content="Clear out your photos by swiping: right to keep, left to delete." />
   <meta name="theme-color" content="#0e0e14" />
@@ -76,16 +76,17 @@
 
     <button class="fab" id="addBtn" aria-label="Add photos">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-      <span>Add photos</span>
+      <span>Add photos &amp; videos</span>
     </button>
-    <input type="file" id="fileInput" accept="image/*" multiple hidden />
+    <input type="file" id="fileInput" accept="image/*,video/*" multiple hidden />
   </div>
 
   <!-- Swipe view -->
   <div class="swiper hidden" id="swiper" aria-modal="true" role="dialog">
     <div class="swiper-top">
-      <button class="icon-btn" id="swiperClose" aria-label="Back to grid">
-        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      <button class="back-pill" id="swiperClose" aria-label="Back to all photos">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span>All photos</span>
       </button>
       <div class="swiper-progress">
         <div class="bar"><i id="swiperBar"></i></div>
@@ -112,6 +113,7 @@
   <div class="sheet-backdrop hidden" id="viewer">
     <div class="viewer">
       <img id="viewerImg" alt="" />
+      <video id="viewerVideo" class="hidden" controls playsinline></video>
       <div class="viewer-meta" id="viewerMeta"></div>
       <div class="viewer-actions" id="viewerActions"></div>
     </div>

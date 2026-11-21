@@ -52,6 +52,26 @@ const thumbUrls = new Map();    // id -> displayable URL
 const $ = (id) => document.getElementById(id);
 const byStatus = (s) => photos.filter((p) => p.status === s);
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const isVideo = (p) => p.kind === 'video';
+const itemWord = (n, list) => {
+  const v = list ? list.every(isVideo) : false;
+  return plural(n, v ? 'video' : (list && list.some(isVideo) ? 'item' : 'photo'));
+};
+function fmtDuration(sec) {
+  if (!sec && sec !== 0) return '';
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s2 = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s2).padStart(2, '0')}` : `${m}:${String(s2).padStart(2, '0')}`;
+}
+function fmtBytes(b) {
+  if (!b) return '';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return `${b < 10 && i ? b.toFixed(1) : Math.round(b)} ${u[i]}`;
+}
+const freed = () => Number(localStorage.getItem('freedBytes') || 0);
+const addFreed = (n) => localStorage.setItem('freedBytes', String(freed() + (n || 0)));
 
 function forget(ids) {
   ids.forEach((id) => {
@@ -101,6 +121,12 @@ async function loadThumb(p) {
 
 async function loadFull(p) {
   if (NATIVE) {
+    if (isVideo(p)) {
+      try {
+        const { path } = await Lib.getVideo({ id: p.id });
+        return Cap.convertFileSrc(path);
+      } catch { return null; }
+    }
     try { return await nativeImage(p.id, 2048); } catch { return loadThumb(p); }
   }
   const blob = await db.getBlob(p.id);
@@ -117,6 +143,10 @@ async function removeForever(ids) {
     let res;
     try { res = await Lib.deletePhotos({ ids }); } catch (e) { res = { deleted: false }; }
     if (!res.deleted) return false;
+    addFreed(res.bytes);
+  } else {
+    const gone = new Set(ids);
+    addFreed(photos.filter((p) => gone.has(p.id)).reduce((a, p) => a + (p.size || 0), 0));
   }
   await db.deletePhotos(ids);
   forget(ids);
@@ -154,6 +184,7 @@ async function syncNativeLibrary() {
     const s = stored.get(a.id);
     return {
       id: a.id, name: '', taken: a.taken || 0, width: a.width, height: a.height,
+      kind: a.type === 'video' ? 'video' : 'image', duration: a.duration, size: a.size,
       status: s?.status || 'pending', reviewedAt: s?.reviewedAt || 0, trashedAt: s?.trashedAt || 0,
     };
   });
@@ -163,6 +194,27 @@ async function syncNativeLibrary() {
 }
 
 /* ---------- Web import ---------- */
+
+// Poster frame + duration for a picked video file (website mode).
+function videoInfo(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    const done = (r) => { URL.revokeObjectURL(url); r(); };
+    v.onloadedmetadata = () => { v.currentTime = Math.min(0.5, (v.duration || 1) / 2); };
+    v.onseeked = () => {
+      const MAX = 360, w = v.videoWidth, h = v.videoHeight;
+      const scale = Math.min(1, MAX / Math.min(w, h));
+      const c = document.createElement('canvas');
+      c.width = Math.round(w * scale); c.height = Math.round(h * scale);
+      c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+      c.toBlob((thumb) => done(() => resolve({ thumb, duration: v.duration })), 'image/jpeg', 0.78);
+    };
+    v.onerror = () => done(() => reject(new Error('video')));
+    v.src = url;
+  });
+}
 
 async function makeThumb(file) {
   const MAX = 360;
@@ -190,21 +242,25 @@ async function makeThumb(file) {
 }
 
 async function importFiles(fileList) {
-  const files = [...fileList].filter((f) => f.type.startsWith('image/') || /\.(heic|heif|jpe?g|png|webp|gif)$/i.test(f.name));
+  const files = [...fileList].filter((f) => /^(image|video)\//.test(f.type) || /\.(heic|heif|jpe?g|png|webp|gif|mov|mp4|m4v)$/i.test(f.name));
   if (!files.length) return;
   $('importing').classList.remove('hidden');
   let added = 0, skipped = 0;
   try {
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
-      $('importText').textContent = `Adding photos… ${i + 1} / ${files.length}`;
+      $('importText').textContent = `Adding… ${i + 1} / ${files.length}`;
       const sig = `${f.name}|${f.size}|${f.lastModified}`;
       if (await db.hasSig(sig)) { skipped++; continue; }
-      let thumb = null;
-      try { thumb = await makeThumb(f); } catch { /* unsupported format: still importable */ }
+      const video = f.type.startsWith('video/') || /\.(mov|mp4|m4v)$/i.test(f.name);
+      let thumb = null, duration;
+      try {
+        if (video) ({ thumb, duration } = await videoInfo(f));
+        else thumb = await makeThumb(f);
+      } catch { /* unsupported format: still importable */ }
       const meta = {
         id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        sig, name: f.name, size: f.size, type: f.type,
+        sig, name: f.name, size: f.size, type: f.type, kind: video ? 'video' : 'image', duration,
         taken: f.lastModified || Date.now(), addedAt: Date.now(),
         status: 'pending', reviewedAt: 0, trashedAt: 0, thumb,
       };
@@ -220,7 +276,7 @@ async function importFiles(fileList) {
   }
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
   setTab('pending');
-  if (added || skipped) toast(`Added ${plural(added, 'photo')}${skipped ? ` · ${skipped} already here` : ''}`);
+  if (added || skipped) toast(`Added ${plural(added, 'item')}${skipped ? ` · ${skipped} already here` : ''}`);
 }
 
 /* ---------- Rendering ---------- */
@@ -282,6 +338,12 @@ function makeCell(p) {
   } else if (thumbObserver) thumbObserver.observe(cell);
   else loadThumb(p).then((u) => { if (u) img.src = u; });
   if (now || NATIVE) cell.prepend(img);
+  if (isVideo(p)) {
+    const v = document.createElement('span');
+    v.className = 'vbadge';
+    v.textContent = `▶ ${fmtDuration(p.duration)}`;
+    cell.append(v);
+  }
   if (tab === 'trash') {
     const left = daysLeft(p);
     const b = document.createElement('span');
@@ -361,7 +423,7 @@ async function setStatus(p, status) {
 
 /* ---------- Swipe view ---------- */
 
-const swipe = { queue: [], index: 0, history: [], urls: new Map(), goalCelebrated: false };
+const swipe = { queue: [], index: 0, history: [], urls: new Map(), goalCelebrated: false, muted: true };
 
 function openSwiper(startId) {
   const list = sortList(byStatus('pending'), 'pending');
@@ -415,6 +477,10 @@ function updateSwiperBar() {
   $('btnKeep').disabled = $('btnTrash').disabled = finished;
 }
 
+function infoText(p) {
+  return [fmtDate(p.taken), isVideo(p) ? fmtDuration(p.duration) : '', fmtBytes(p.size)].filter(Boolean).join(' · ');
+}
+
 function buildCard(p, isTop) {
   const card = document.createElement('div');
   card.className = 'card' + (isTop ? '' : ' back');
@@ -427,9 +493,52 @@ function buildCard(p, isTop) {
   card.append(img);
   card.insertAdjacentHTML('beforeend',
     `<div class="stamp keep">KEEP</div><div class="stamp trash">DELETE</div>
-     <div class="info">${fmtDate(p.taken)}</div>`);
-  Promise.resolve(fullUrl(p)).then((u) => { if (u) img.src = u; });
+     <div class="info"></div>`);
+  const info = card.querySelector('.info');
+  info.textContent = infoText(p);
+  if (NATIVE && p.size == null) {
+    Lib.getInfo({ id: p.id }).then(({ size }) => { p.size = size; info.textContent = infoText(p); }).catch(() => {});
+  }
+
+  if (isVideo(p)) {
+    card.classList.add('is-video');
+    const badge = document.createElement('div');
+    badge.className = 'vplay';
+    badge.textContent = isTop ? 'Loading video…' : '▶';
+    card.append(badge);
+    if (isTop) {
+      Promise.resolve(fullUrl(p)).then((u) => {
+        if (!u || !card.isConnected) { badge.textContent = 'Video unavailable'; return; }
+        const v = document.createElement('video');
+        v.src = u; v.muted = swipe.muted; v.loop = true; v.playsInline = true; v.autoplay = true;
+        v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
+        if (quick) v.poster = quick;
+        v.addEventListener('playing', () => { img.remove(); updateMuteBadge(card); }, { once: true });
+        card.insertBefore(v, img);
+        v.play().catch(() => { badge.textContent = '▶ Tap to play'; });
+      });
+    } else {
+      fullUrl(p);   // start preparing the next video in the background
+    }
+  } else {
+    Promise.resolve(fullUrl(p)).then((u) => { if (u) img.src = u; });
+  }
   return card;
+}
+
+function updateMuteBadge(card) {
+  const b = card.querySelector('.vplay');
+  if (b) b.textContent = swipe.muted ? '🔇 Tap for sound' : '🔊 Sound on';
+}
+
+// Tap on a video card: play if paused, otherwise toggle sound.
+function tapCard(card) {
+  const v = card.querySelector('video');
+  if (!v) return;
+  if (v.paused) { v.play().catch(() => {}); updateMuteBadge(card); return; }
+  swipe.muted = !swipe.muted;
+  v.muted = swipe.muted;
+  updateMuteBadge(card);
 }
 
 function renderDeck() {
@@ -443,7 +552,7 @@ function renderDeck() {
     deck.innerHTML = `<div class="card-done">
       <div><div class="big">${goalDone ? '🎉' : '✨'}</div>
       <h3>${goalDone ? 'Daily goal done!' : 'All caught up'}</h3>
-      <p>${plural(n, 'photo')} waiting in Deleted · restore any within ${plural(settings.retentionDays, 'day')}.</p>
+      <p>${itemWord(n, byStatus('trash'))} waiting in Deleted · restore any within ${plural(settings.retentionDays, 'day')}.</p>
       <button class="primary small" id="doneBack">Back to photos</button></div></div>`;
     $('doneBack').onclick = () => closeSwiper();
     return;
@@ -457,7 +566,7 @@ function renderDeck() {
   attachDrag(card);
   // warm the cache for the one after
   const after = swipe.queue[swipe.index + 2];
-  if (after) fullUrl(after);
+  if (after && !isVideo(after)) fullUrl(after);
 }
 
 function attachDrag(card) {
@@ -480,6 +589,11 @@ function attachDrag(card) {
   const end = () => {
     if (!active) return;
     active = false;
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8 && performance.now() - t0 < 400) {
+      card.style.transform = '';
+      tapCard(card);
+      return;
+    }
     const v = dx / Math.max(1, performance.now() - t0); // px per ms
     const threshold = Math.min(120, card.offsetWidth * 0.28);
     if (dx > threshold || (v > 0.5 && dx > 30)) decide('kept');
@@ -506,6 +620,7 @@ async function decide(status) {
     card.style.transition = 'transform .3s ease-in, opacity .3s';
     card.style.transform = `translate(${dir * window.innerWidth * 1.2}px, 40px) rotate(${dir * 28}deg)`;
     card.style.opacity = '0';
+    card.querySelector('video')?.pause();
     const back = $('deck').querySelector('.card.back');
     if (back) back.classList.remove('back');
   }
@@ -541,13 +656,22 @@ async function undo() {
 
 let viewerUrl = null;
 async function openViewer(p) {
-  $('viewerImg').src = thumbUrlNow(p) || '';
+  const img = $('viewerImg'), vid = $('viewerVideo');
+  img.src = thumbUrlNow(p) || '';
+  img.classList.remove('hidden');
+  vid.classList.add('hidden');
+  $('viewer').classList.remove('hidden');
   viewerUrl = await loadFull(p);
-  if (viewerUrl) $('viewerImg').src = viewerUrl;
+  if (viewerUrl && isVideo(p)) {
+    vid.poster = thumbUrlNow(p) || '';
+    vid.src = viewerUrl;
+    vid.classList.remove('hidden');
+    img.classList.add('hidden');
+  } else if (viewerUrl) img.src = viewerUrl;
   const extra = p.status === 'trash'
     ? ` · deleted ${fmtDate(p.trashedAt)} · ${plural(daysLeft(p), 'day')} left`
     : ` · kept ${fmtDate(p.reviewedAt)}`;
-  $('viewerMeta').textContent = `${p.name ? p.name + ' · ' : ''}${fmtDate(p.taken)}${extra}`;
+  $('viewerMeta').textContent = `${p.name ? p.name + ' · ' : ''}${infoText(p)}${extra}`;
 
   const actions = $('viewerActions');
   actions.textContent = '';
@@ -572,6 +696,8 @@ async function openViewer(p) {
 }
 function closeViewer() {
   $('viewer').classList.add('hidden');
+  const vid = $('viewerVideo');
+  vid.pause(); vid.removeAttribute('src'); vid.load();
   if (viewerUrl?.startsWith('blob:')) URL.revokeObjectURL(viewerUrl);
   viewerUrl = null;
 }
@@ -680,7 +806,7 @@ function openSettings() {
   $('statsBox').innerHTML = `
     <div class="stat"><b>${total}</b><span>reviewed all-time</span></div>
     <div class="stat"><b>${streak()}</b><span>day streak</span></div>
-    <div class="stat"><b>${byStatus('trash').length}</b><span>in Deleted</span></div>`;
+    <div class="stat"><b>${fmtBytes(freed()) || '0 MB'}</b><span>space freed</span></div>`;
   $('notifyBtn').classList.toggle('hidden', NATIVE || !('Notification' in window) || Notification.permission !== 'default');
   updateReminderButton();
   $('settings').classList.remove('hidden');
@@ -781,20 +907,21 @@ function bind() {
     const list = byStatus('trash');
     for (const p of list) await setStatus(p, 'kept');
     render();
-    toast(`Restored ${plural(list.length, 'photo')}`);
+    toast(`Restored ${itemWord(list.length, list)}`);
   };
   $('emptyTrashBtn').onclick = async () => {
-    const ids = byStatus('trash').map((p) => p.id);
+    const list = byStatus('trash');
+    const ids = list.map((p) => p.id);
     if (!ids.length) return;
-    if (!NATIVE && !confirm(`Remove ${plural(ids.length, 'photo')} for good? This can't be undone.`)) return;
+    if (!NATIVE && !confirm(`Remove ${itemWord(ids.length, list)} for good? This can't be undone.`)) return;
     const ok = await removeForever(ids);
     render();
-    toast(ok ? `Deleted ${plural(ids.length, 'photo')}` : 'Not deleted');
+    toast(ok ? `Deleted ${itemWord(ids.length, list)}` : 'Not deleted');
   };
   $('expiredBtn').onclick = async () => {
     const n = await purgeExpired({ force: true });
     render();
-    if (n) toast(`Deleted ${plural(n, 'photo')} from your phone`);
+    if (n) toast(`Deleted ${plural(n, 'item')} from your phone`);
   };
 
   $('settingsBtn').onclick = openSettings;
@@ -856,7 +983,7 @@ async function init() {
   render();
   const purged = await purgeExpired();
   render();
-  if (purged) toast(`${plural(purged, 'photo')} passed ${settings.retentionDays} days in Deleted and ${purged === 1 ? 'was' : 'were'} removed`);
+  if (purged) toast(`${plural(purged, 'item')} passed ${settings.retentionDays} days in Deleted and ${purged === 1 ? 'was' : 'were'} removed`);
   else if (byStatus('pending').length && todayCount() < settings.dailyGoal && todayCount() > 0) {
     toast(`${settings.dailyGoal - todayCount()} left for today's goal`);
   }
