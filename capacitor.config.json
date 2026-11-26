@@ -1,5 +1,10 @@
 {
   "appId": "com.aayushmk.swipeclean",
   "appName": "Swipe Clean",
-  "webDir": "www"
+  "webDir": "www",
+  "plugins": {
+    "SystemBars": {
+      "style": "DARK"
+    }
+  }
 }

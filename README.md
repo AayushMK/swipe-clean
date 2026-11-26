@@ -41,10 +41,17 @@ With a free Apple ID the app stops opening after 7 days. Re-run from Xcode to re
 To share with other iPhone users you need the paid Apple Developer Program ($99/year) and TestFlight or the App Store.
 
 ## Install on Android
-Needs Android Studio (includes the Android SDK and Java).
-1. `npm install` then `npm run android` (opens Android Studio).
-2. **Run ▶** to a connected phone, or **Build → Build App Bundle(s) / APK(s) → Build APK(s)**.
-3. Share the `.apk` file with anyone. They open it and allow “Install unknown apps”.
+Ready-made file: `SwipeClean.apk` (build it with the steps below if it's missing).
+1. Send the `.apk` to the phone (AirDrop to a Mac doesn't work for Android: use Google Drive, email, WhatsApp, or a USB cable).
+2. Open it on the phone. Android asks to allow installing from that app (Files, Chrome, Drive…) the first time: tap **Settings → Allow from this source**, go back, tap **Install**.
+3. Open Swipe Clean and allow access to photos and videos.
+
+Build it yourself (needs Java 21 + Android SDK; on this Mac they're installed via Homebrew):
+```bash
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=$HOME/Library/Android/sdk
+npm run sync && (cd android && ./gradlew assembleDebug)
+```
+The APK is at `android/app/build/outputs/apk/debug/app-debug.apk`.
 
 ## After changing the app
 ```bash

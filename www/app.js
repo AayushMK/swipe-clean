@@ -926,6 +926,9 @@ async function scheduleNativeReminder() {
       title: 'Swipe Clean 🧹',
       body: `Time for today's cleanup — review ${settings.dailyGoal} photos.`,
       schedule: { on: { hour, minute }, allowWhileIdle: true },
+      // A daily nudge doesn't need to-the-second timing; without this, Android
+      // asks for the extra "Alarms & reminders" permission.
+      isExactNotification: false,
     }],
   });
   return true;
@@ -1217,6 +1220,16 @@ async function init() {
   maybeNotify();
   if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+
+// Android Back button: close whatever is open, step back to "To review",
+// and only then let the app close. Returns true if it handled the press.
+window.swipeCleanBack = () => {
+  if (!$('viewer').classList.contains('hidden')) { closeViewer(); return true; }
+  if (!$('settings').classList.contains('hidden')) { $('settings').classList.add('hidden'); return true; }
+  if (!$('swiper').classList.contains('hidden')) { closeSwiper(); return true; }
+  if (tab !== 'pending') { setTab('pending'); return true; }
+  return false;
+};
 
 // Exposed for testing/debugging in the console
 window.swipeClean = { importFiles, purgeExpired, settings, render, get photos() { return photos; } };
