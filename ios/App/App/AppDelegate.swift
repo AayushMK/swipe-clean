@@ -7,7 +7,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        BusyCheck.registerTask()   // "only on busy days" reminder runs in the background
+        #if DEBUG
+        // Test hook (debug builds only): launch with BUSY_TEST=1 to run the check after 5 s.
+        if ProcessInfo.processInfo.environment["BUSY_TEST"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { BusyCheck.check {} }
+        }
+        #endif
         return true
     }
 

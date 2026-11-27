@@ -302,6 +302,19 @@ public class PhotoLibraryPlugin extends Plugin {
         return new long[] { bytes, count };
     }
 
+    /** "Only on busy days" reminder: check at hour:minute each day, notify if threshold+ new items. */
+    @PluginMethod
+    public void scheduleBusyCheck(PluginCall call) {
+        BusyCheckReceiver.schedule(getContext(), call.getInt("hour", 20), call.getInt("minute", 0), call.getInt("threshold", 30));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void cancelBusyCheck(PluginCall call) {
+        BusyCheckReceiver.cancel(getContext());
+        call.resolve();
+    }
+
     @PluginMethod
     public void openSettings(PluginCall call) {
         Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,

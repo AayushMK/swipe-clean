@@ -175,8 +175,22 @@
         <small id="daysNote">After this, they're removed for good. 0 = remove immediately.</small>
       </label>
 
+      <label class="field native-only">
+        <span>Remind me</span>
+        <div class="select-pill wide"><select id="setMode">
+          <option value="daily">Every day</option>
+          <option value="busy">Only on days I take lots of photos</option>
+        </select></div>
+      </label>
+
+      <label class="field native-only hidden" id="busyField">
+        <span>“Lots of photos” means at least</span>
+        <input type="number" id="setBusy" min="1" max="5000" inputmode="numeric" />
+        <small id="busyNote">new photos & videos in the last 24 hours.</small>
+      </label>
+
       <label class="field">
-        <span>Daily reminder time</span>
+        <span id="timeLabel">Daily reminder time</span>
         <input type="time" id="setTime" required />
       </label>
       <button type="button" class="secondary" id="reminderBtn">📅 Add daily reminder to my calendar</button>

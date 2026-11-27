@@ -3,6 +3,82 @@ import UIKit
 import Photos
 import AVFoundation
 import Capacitor
+import BackgroundTasks
+import UserNotifications
+
+/// "Only on busy days" reminder. iOS can't run an app at an exact time, so we ask for a
+/// background refresh no earlier than the chosen time; when iOS runs it, count the photos
+/// and videos taken in the last 24 hours and notify only if there are at least `threshold`.
+enum BusyCheck {
+    static let taskId = "com.aayushmk.swipeclean.busycheck"
+    private static let defaults = UserDefaults.standard
+
+    /// Call once from application(_:didFinishLaunchingWithOptions:).
+    static func registerTask() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: taskId, using: nil) { task in
+            run(task as! BGAppRefreshTask)
+        }
+    }
+
+    static func schedule(hour: Int, minute: Int, threshold: Int) {
+        defaults.set(true, forKey: "busy.on")
+        defaults.set(hour, forKey: "busy.hour")
+        defaults.set(minute, forKey: "busy.minute")
+        defaults.set(threshold, forKey: "busy.threshold")
+        planNext()
+    }
+
+    static func cancel() {
+        defaults.set(false, forKey: "busy.on")
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskId)
+    }
+
+    static func planNext() {
+        guard defaults.bool(forKey: "busy.on") else { return }
+        let cal = Calendar.current
+        let today = cal.date(bySettingHour: defaults.integer(forKey: "busy.hour"),
+                             minute: defaults.integer(forKey: "busy.minute"), second: 0, of: Date()) ?? Date()
+        let next: Date
+        if defaults.string(forKey: "busy.lastDay") == dayKey(Date()) {
+            next = cal.date(byAdding: .day, value: 1, to: today) ?? today   // done today: tomorrow
+        } else {
+            next = max(today, Date())   // later today, or as soon as iOS allows if the time has passed
+        }
+        let req = BGAppRefreshTaskRequest(identifier: taskId)
+        req.earliestBeginDate = next
+        try? BGTaskScheduler.shared.submit(req)
+    }
+
+    private static func dayKey(_ d: Date) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: d)
+        return "\(c.year ?? 0)-\(c.month ?? 0)-\(c.day ?? 0)"
+    }
+
+    private static func run(_ task: BGAppRefreshTask) {
+        task.expirationHandler = { task.setTaskCompleted(success: false) }
+        check { task.setTaskCompleted(success: true) }
+    }
+
+    /// Count recent items and notify if it was a busy day. Public so the app can run it directly.
+    static func check(done: @escaping () -> Void) {
+        guard defaults.bool(forKey: "busy.on") else { return done() }
+        let threshold = max(1, defaults.integer(forKey: "busy.threshold"))
+        let opts = PHFetchOptions()
+        opts.predicate = NSPredicate(format: "creationDate >= %@ AND (mediaType == %d OR mediaType == %d)",
+                                     Date().addingTimeInterval(-24 * 3600) as NSDate,
+                                     PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+        let count = PHAsset.fetchAssets(with: opts).count
+        defaults.set(dayKey(Date()), forKey: "busy.lastDay")
+        planNext()
+        guard count >= threshold else { return done() }
+        let content = UNMutableNotificationContent()
+        content.title = "Swipe Clean 🧹"
+        content.body = "You took \(count) photos & videos today — clean them up while you remember them."
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: "busy-day", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req) { _ in done() }
+    }
+}
 
 /// Hosts the web app and registers our in-app plugin.
 class MainViewController: CAPBridgeViewController {
@@ -27,6 +103,8 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "openSettings", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openPhotosApp", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getStorageInfo", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "scheduleBusyCheck", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cancelBusyCheck", returnType: CAPPluginReturnPromise),
     ]
 
     private let imageManager = PHCachingImageManager()
@@ -263,6 +341,17 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let url = URL(string: "photos-redirect://") else { return call.resolve(["opened": false]) }
             UIApplication.shared.open(url) { ok in call.resolve(["opened": ok]) }
         }
+    }
+
+    @objc func scheduleBusyCheck(_ call: CAPPluginCall) {
+        BusyCheck.schedule(hour: call.getInt("hour") ?? 20, minute: call.getInt("minute") ?? 0,
+                           threshold: call.getInt("threshold") ?? 30)
+        call.resolve()
+    }
+
+    @objc func cancelBusyCheck(_ call: CAPPluginCall) {
+        BusyCheck.cancel()
+        call.resolve()
     }
 
     @objc func openSettings(_ call: CAPPluginCall) {

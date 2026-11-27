@@ -16,7 +16,8 @@ One codebase (`www/`) ships two ways:
 ## Features
 - Grid of photos to review. Tap one to start swiping from that photo.
 - Swipe right or ✓ to keep. Swipe left or ✕ to delete. ↶ undoes.
-- Daily goal (default 100) with progress ring and streak; daily reminder.
+- Daily goal (default 100) with progress ring and streak.
+- Reminder (apps): every day, or only on days you take lots of photos (you pick how many and what time). On iPhone the busy-day check uses Background App Refresh, so iOS decides exactly when it runs.
 - **Deleted** holds photos for N days (default 10) so you can restore them. After that:
   - **iPhone:** iOS asks “Allow Swipe Clean to delete N photos?” (Apple requires this for every delete), then the photos move to the Photos app’s *Recently Deleted* for 30 days.
   - **Android 11+:** Android shows a similar confirmation and deletes them.

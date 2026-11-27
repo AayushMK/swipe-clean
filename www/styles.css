@@ -294,3 +294,10 @@ html, body, button, .cell, .card { touch-action: manipulation; }
 #app input, .sheet input { -webkit-user-select: text; user-select: text; }
 #app img { -webkit-user-drag: none; user-drag: none; }
 .install-hint a { color: inherit; font-weight: 600; }
+
+/* Reminder mode (native app only) */
+.native-only { display: none; }
+.native .native-only { display: block; }
+.native .native-only.hidden { display: none; }
+.select-pill.wide, .select-pill.wide select { display: block; width: 100%; }
+.select-pill.wide select { padding: 13px 34px 13px 14px; border-radius: 12px; font-weight: 500; font-size: 16px; }

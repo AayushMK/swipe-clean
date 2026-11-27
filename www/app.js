@@ -16,7 +16,8 @@ const REMINDER_ID = 1001;
 
 /* ---------- Settings & daily stats (localStorage) ---------- */
 
-const DEFAULTS = { dailyGoal: 100, retentionDays: 10, reminderTime: '20:00', reminderOn: false, sortOrder: 'newest' };
+const DEFAULTS = { dailyGoal: 100, retentionDays: 10, reminderTime: '20:00', reminderOn: false, sortOrder: 'newest',
+  reminderMode: 'daily', busyThreshold: 30 };
 const DAY = 24 * 60 * 60 * 1000;
 
 const settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('settings') || '{}') };
@@ -989,6 +990,7 @@ const reminderIds = () => [REMINDER_ID, ...Array.from({ length: REMINDER_DAYS },
 
 async function cancelNativeReminders() {
   await Notify.cancel({ notifications: reminderIds().map((id) => ({ id })) }).catch(() => {});
+  await Lib.cancelBusyCheck().catch(() => {});
 }
 
 function reminderText(isToday) {
@@ -1009,6 +1011,11 @@ async function scheduleNativeReminder({ ask = true } = {}) {
   }
   await cancelNativeReminders();
   const [hour, minute] = settings.reminderTime.split(':').map(Number);
+  if (settings.reminderMode === 'busy') {
+    // The phone itself checks at this time each day and only notifies on busy days.
+    await Lib.scheduleBusyCheck({ hour, minute, threshold: settings.busyThreshold });
+    return true;
+  }
   const now = new Date();
   const goalDone = todayCount() >= settings.dailyGoal;
   const list = [];
@@ -1075,10 +1082,16 @@ function downloadReminder() {
 async function onReminderButton() {
   settings.reminderTime = $('setTime').value || settings.reminderTime;
   if (NATIVE) {
+    settings.reminderMode = $('setMode').value === 'busy' ? 'busy' : 'daily';
+    settings.busyThreshold = Math.max(1, parseInt($('setBusy').value, 10) || DEFAULTS.busyThreshold);
     settings.reminderOn = await scheduleNativeReminder();
     saveSettings();
     updateReminderButton();
-    if (settings.reminderOn) toast(`Daily reminder set for ${settings.reminderTime}`);
+    if (settings.reminderOn) {
+      toast(settings.reminderMode === 'busy'
+        ? `At ${settings.reminderTime} you'll be reminded only if you took ${settings.busyThreshold}+ photos`
+        : `Daily reminder set for ${settings.reminderTime}`);
+    }
   } else {
     saveSettings();
     downloadReminder();
@@ -1087,8 +1100,14 @@ async function onReminderButton() {
 
 function updateReminderButton() {
   if (!NATIVE) return;
-  $('reminderBtn').textContent = settings.reminderOn ? '🔔 Daily reminder is on — tap to update' : '🔔 Turn on daily reminder';
-  $('reminderNote').textContent = 'A notification at this time every day. Change the time and tap the button to update it.';
+  $('reminderBtn').textContent = settings.reminderOn ? '🔔 Reminder is on — tap to update' : '🔔 Turn on reminder';
+  $('reminderNote').textContent = reminderNoteText(settings.reminderMode, settings.busyThreshold);
+}
+
+function reminderNoteText(mode, n) {
+  return mode === 'busy'
+    ? `At this time each day the app counts the photos you took in the last 24 hours and only notifies you if there are ${n} or more.${IOS ? ' iPhone decides exactly when the app may check, so it can come a bit later than this time.' : ''}`
+    : 'A notification at this time every day (skipped once you’ve hit your daily goal).';
 }
 
 // Website extra nudge: a notification when the app is opened later in the day.
@@ -1115,6 +1134,9 @@ function openSettings() {
   $('setGoal').value = settings.dailyGoal;
   $('setDays').value = settings.retentionDays;
   $('setTime').value = settings.reminderTime;
+  $('setMode').value = settings.reminderMode;
+  $('setBusy').value = settings.busyThreshold;
+  showModeFields();
   const total = Object.values(stats).reduce((a, b) => a + b, 0);
   $('statsBox').innerHTML = `
     <div class="stat"><b>${total}</b><span>reviewed all-time</span></div>
@@ -1125,15 +1147,29 @@ function openSettings() {
   $('settings').classList.remove('hidden');
 }
 
+function showModeFields() {
+  const busy = $('setMode').value === 'busy';
+  $('busyField').classList.toggle('hidden', !busy);
+  $('timeLabel').textContent = busy ? 'Check at this time' : 'Daily reminder time';
+  if (NATIVE) $('reminderNote').textContent = reminderNoteText($('setMode').value, parseInt($('setBusy').value, 10) || DEFAULTS.busyThreshold);
+}
+
 async function saveSettingsForm(e) {
   e.preventDefault();
   const oldTime = settings.reminderTime, oldGoal = settings.dailyGoal;
+  const oldMode = settings.reminderMode, oldBusy = settings.busyThreshold;
+  if (NATIVE) {
+    settings.reminderMode = $('setMode').value === 'busy' ? 'busy' : 'daily';
+    settings.busyThreshold = Math.max(1, parseInt($('setBusy').value, 10) || DEFAULTS.busyThreshold);
+  }
+  const modeChanged = oldMode !== settings.reminderMode || oldBusy !== settings.busyThreshold;
   settings.dailyGoal = Math.max(1, parseInt($('setGoal').value, 10) || DEFAULTS.dailyGoal);
   settings.retentionDays = Math.max(0, parseInt($('setDays').value, 10) || 0);
   settings.reminderTime = $('setTime').value || DEFAULTS.reminderTime;
   saveSettings();
-  if (NATIVE && settings.reminderOn && (oldTime !== settings.reminderTime || oldGoal !== settings.dailyGoal)) {
-    await scheduleNativeReminder({ ask: false }).catch(() => {});
+  if (NATIVE && (modeChanged || (settings.reminderOn && (oldTime !== settings.reminderTime || oldGoal !== settings.dailyGoal)))) {
+    settings.reminderOn = await scheduleNativeReminder({ ask: true }).catch(() => settings.reminderOn);
+    saveSettings();
   }
   $('settings').classList.add('hidden');
   render();
@@ -1268,6 +1304,8 @@ function bind() {
   $('settings').addEventListener('click', (e) => { if (e.target.id === 'settings') $('settings').classList.add('hidden'); });
   $('settingsForm').onsubmit = saveSettingsForm;
   $('reminderBtn').onclick = onReminderButton;
+  $('setMode').onchange = showModeFields;
+  $('setBusy').oninput = showModeFields;
   // iPhone: tapping the styled time field didn't open the time wheel. Open it ourselves.
   $('setTime').addEventListener('click', (e) => {
     try { e.currentTarget.showPicker?.(); } catch { /* not supported: focus is enough */ }
