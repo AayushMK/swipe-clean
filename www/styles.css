@@ -76,7 +76,13 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .tab.active { background: var(--panel-2); color: var(--text); }
 
 /* Order of To review */
-.sort-bar { display: flex; align-items: center; gap: 10px; margin: 0 2px 10px; font-size: 13px; color: var(--muted); }
+.grid-tools { display: flex; align-items: center; gap: 10px; margin: 0 2px 10px; min-height: 36px; font-size: 13px; color: var(--muted); }
+.grid-tools.hidden { display: none; }
+.sort-bar { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.sort-bar.hidden { display: none; }
+.sel-count { flex: 1; color: var(--text); font-size: 15px; font-weight: 600; }
+.sel-btn { margin-left: auto; padding: 7px 14px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--text); font-weight: 600; font-size: 14px; }
+.selecting .sel-btn { background: var(--accent); border-color: var(--accent); color: #fff; }
 .select-pill { position: relative; }
 .select-pill::after { content: '▾'; position: absolute; right: 11px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--muted); font-size: 12px; }
 .select-pill select {
@@ -326,3 +332,27 @@ html, body, button, .cell, .card { touch-action: manipulation; }
 .native .native-only.hidden { display: none; }
 .select-pill.wide, .select-pill.wide select { display: block; width: 100%; }
 .select-pill.wide select { padding: 13px 34px 13px 14px; border-radius: 12px; font-weight: 500; font-size: 16px; }
+
+/* Selecting photos: check circles on every photo, actions in a bar at the bottom */
+.cell .check { display: none; position: absolute; right: 6px; bottom: 6px; width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid #fff; background: rgba(0,0,0,.25); box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+.selecting .cell .check { display: block; }
+.selecting .cell { touch-action: pan-y; }   /* up/down scrolls, sideways drags select */
+.selecting .cell:active img { transform: none; }
+.cell.sel img { transform: scale(.86); border-radius: 6px; }
+.cell.sel { background: #000; }
+.cell.sel .check { background: var(--accent); }
+.cell.sel .check::after { content: ''; position: absolute; left: 6px; top: 2px; width: 5px; height: 10px;
+  border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.selecting .fab { display: none; }
+.sel-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 25; display: flex; gap: 10px; justify-content: center;
+  padding: 12px 16px calc(var(--safe-bottom) + 12px); background: rgba(24,24,34,.92);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); border-top: 1px solid var(--line);
+}
+.sel-bar.hidden { display: none; }
+.sel-bar button { flex: 1; max-width: 220px; padding: 14px 12px; border-radius: 14px; font-weight: 700; font-size: 15px; background: var(--panel-2); color: var(--text); }
+.sel-bar button.trash { color: #fff; background: var(--trash); }
+.sel-bar button.keep { color: #062; background: var(--keep); }
+.sel-bar button:disabled { opacity: .4; }
+.selecting #app { padding-bottom: calc(var(--safe-bottom) + 90px); }

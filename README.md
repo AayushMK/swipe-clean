@@ -14,7 +14,8 @@ One codebase (`www/`) ships two ways:
 **Live website:** https://aayushmk.github.io/swipe-clean/
 
 ## Features
-- Grid of photos to review. Tap one to start swiping from that photo.
+- Grid of photos to review. Tap one to start swiping from that photo; tap the photo again to see it full size (pinch to zoom, swipe sideways for the next one).
+- Select several photos at once: **Select**, then tap or drag across them like the iPhone Photos app (two-finger drag or long-press also starts it). To review → Keep / Delete, Kept → Back to review / Delete, Deleted → Restore / Delete permanently.
 - Swipe right or ✓ to keep. Swipe left or ✕ to delete. ↶ undoes.
 - Daily goal (default 100) with progress ring and streak.
 - Reminder (apps): every day, or only on days you take lots of photos (you pick how many and what time). On iPhone the busy-day check uses Background App Refresh, so iOS decides exactly when it runs.

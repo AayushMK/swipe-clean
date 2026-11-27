@@ -377,7 +377,7 @@ function renderCounts() {
 
 // Grid renders in pages so huge libraries stay fast.
 const PAGE = 240;
-let gridList = [], gridShown = 0;
+let gridList = [], gridShown = 0, gridIndex = new Map();
 const thumbObserver = 'IntersectionObserver' in window
   ? new IntersectionObserver((entries) => {
     for (const e of entries) {
@@ -413,6 +413,10 @@ function makeCell(p) {
     v.textContent = `▶ ${fmtDuration(p.duration)}`;
     cell.append(v);
   }
+  const check = document.createElement('span');
+  check.className = 'check';
+  cell.append(check);
+  if (sel.ids.has(p.id)) cell.classList.add('sel');
   if (tab === 'trash') {
     const left = daysLeft(p);
     const b = document.createElement('span');
@@ -434,6 +438,8 @@ function appendCells() {
 
 function renderGrid() {
   gridList = sortList(byStatus(tab), tab);
+  gridIndex = new Map(gridList.map((p, i) => [p.id, i]));
+  for (const id of sel.ids) if (!gridIndex.has(id)) sel.ids.delete(id);
   gridShown = 0;
   $('grid').textContent = '';
   appendCells();
@@ -460,7 +466,10 @@ function renderGrid() {
     }
   }
 
-  $('sortBar').classList.toggle('hidden', tab !== 'pending' || gridList.length < 2);
+  $('gridTools').classList.toggle('hidden', !gridList.length);
+  if (!gridList.length && sel.on) setSelecting(false);
+  $('sortBar').classList.toggle('hidden', tab !== 'pending' || gridList.length < 2 || sel.on);
+  renderSelection();
   $('sortSelect').value = settings.sortOrder;
   $('shuffleBtn').classList.toggle('hidden', settings.sortOrder !== 'random');
   $('trashBar').classList.toggle('hidden', tab !== 'trash' || !gridList.length);
@@ -556,18 +565,22 @@ function setupTabSwipe() {
   const area = $('app');
   let x0 = 0, y0 = 0, t0 = 0, tracking = false;
   const begin = (x, y, target) => {
-    if (!$('swiper').classList.contains('hidden') || target.closest('input, .tabs')) return;
+    if (!$('swiper').classList.contains('hidden') || target.closest('input, .tabs') || sel.on) return;
     tracking = true; x0 = x; y0 = y; t0 = performance.now();
   };
   const finish = (x, y) => {
     if (!tracking) return;
     tracking = false;
+    if (sel.on) return;   // a drag that started selecting photos isn't a tab swipe
     const dx = x - x0, dy = y - y0;
     if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy) && performance.now() - t0 < 700) {
       switchTabBy(dx < 0 ? 1 : -1);        // swipe left → next tab, right → previous
     }
   };
-  area.addEventListener('touchstart', (e) => { if (e.touches.length === 1) begin(e.touches[0].clientX, e.touches[0].clientY, e.target); }, { passive: true });
+  area.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) begin(e.touches[0].clientX, e.touches[0].clientY, e.target);
+    else tracking = false;   // two fingers: that's selecting, not a tab swipe
+  }, { passive: true });
   area.addEventListener('touchend', (e) => finish(e.changedTouches[0].clientX, e.changedTouches[0].clientY), { passive: true });
   area.addEventListener('touchcancel', () => { tracking = false; }, { passive: true });
   // mouse (desktop)
@@ -576,10 +589,239 @@ function setupTabSwipe() {
 }
 
 function setTab(t) {
+  if (sel.on) setSelecting(false);
   tab = t;
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   render();
   window.scrollTo({ top: 0 });
+}
+
+/* ---------- Selecting several photos ----------
+   Select → tap photos, or drag across them like the iPhone Photos app: start sideways and
+   keep going (rows included); near the top/bottom edge the grid scrolls by itself.
+   Shortcuts: drag with two fingers, or long-press a photo. */
+
+const sel = { on: false, ids: new Set(), drag: null, suppressClick: false };
+
+function setSelecting(on) {
+  sel.on = on;
+  sel.drag = null;
+  if (!on) sel.ids.clear();
+  document.body.classList.toggle('selecting', on);
+  $('sortBar').classList.toggle('hidden', tab !== 'pending' || gridList.length < 2 || on);
+  renderSelection();
+}
+
+function toggleSelected(id) {
+  if (sel.ids.has(id)) sel.ids.delete(id); else sel.ids.add(id);
+  renderSelection();
+}
+
+function selectedPhotos() { return gridList.filter((p) => sel.ids.has(p.id)); }
+
+function renderSelection() {
+  document.querySelectorAll('#grid .cell').forEach((c) => c.classList.toggle('sel', sel.ids.has(c.dataset.id)));
+  $('selectBtn').textContent = sel.on ? 'Done' : 'Select';
+  $('selCount').classList.toggle('hidden', !sel.on);
+  $('selectAllBtn').classList.toggle('hidden', !sel.on);
+  const list = selectedPhotos(), n = list.length;
+  $('selCount').textContent = n ? `${itemWord(n, list)} selected` : 'Tap or drag to select';
+  $('selectAllBtn').textContent = n && n === gridList.length ? 'Deselect all' : 'Select all';
+  const bar = $('selBar');
+  bar.classList.toggle('hidden', !sel.on);
+  if (!sel.on) return;
+  const actions = {
+    pending: [['Delete', 'trash', 'trash'], ['Keep', 'keep', 'kept']],
+    kept: [['Back to review', '', 'pending'], ['Delete', 'trash', 'trash']],
+    trash: [['Restore', '', 'kept'], [NATIVE ? 'Delete from phone' : 'Delete permanently', 'trash', 'forever']],
+  }[tab];
+  if (bar.dataset.tab !== tab) {
+    bar.dataset.tab = tab;
+    bar.textContent = '';
+    actions.forEach(([label, cls, to]) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = cls; b.textContent = label;
+      b.onclick = () => applyToSelected(to);
+      bar.append(b);
+    });
+  }
+  bar.querySelectorAll('button').forEach((b) => { b.disabled = !n; });
+}
+
+// Change many photos at once (one save for all of them).
+async function setStatusMany(list, status) {
+  const now = Date.now();
+  list.forEach((p) => {
+    p.status = status;
+    p.reviewedAt = status === 'pending' ? 0 : now;
+    p.trashedAt = status === 'trash' ? now : 0;
+  });
+  if (NATIVE) {
+    if (status === 'pending') await db.deletePhotos(list.map((p) => p.id));
+    else await db.putManyMeta(list.map((p) => ({ id: p.id, status, reviewedAt: p.reviewedAt, trashedAt: p.trashedAt })));
+  } else {
+    await db.putManyMeta(list);
+  }
+  if (!db.storageOk()) showFullBanner();
+}
+
+async function applyToSelected(to) {
+  const list = selectedPhotos();
+  if (!list.length) return;
+  const from = tab, n = list.length, what = itemWord(n, list);
+  if (to === 'forever') {
+    if (!NATIVE && !confirm(`Remove ${what} for good? This can't be undone.`)) return;
+    const ok = await removeForever(list.map((p) => p.id));
+    setSelecting(false); render();
+    if (ok) deletedToast(`Deleted ${what}`); else toast('Not deleted');
+    return;
+  }
+  await setStatusMany(list, to);
+  if (from === 'pending') bumpToday(n);   // reviewing counts toward today's goal
+  setSelecting(false); render();
+  const done = { trash: `Moved ${what} to Deleted`, kept: from === 'trash' ? `Restored ${what}` : `Kept ${what}`, pending: `Moved ${what} back to To review` }[to];
+  toast(done, {
+    label: 'Undo',
+    fn: async () => {
+      await setStatusMany(list, from);
+      if (from === 'pending') bumpToday(-n);
+      render();
+    },
+  });
+}
+
+// Drag-select: everything between where the drag started and the finger gets the
+// opposite of the starting photo's state; photos the drag leaves go back to how they were.
+function rangeBegin(i) {
+  if (i == null) return;
+  sel.drag = { anchor: i, base: new Set(sel.ids), target: !sel.ids.has(gridList[i].id), x: 0, y: 0, raf: 0 };
+  rangeTo(i);
+}
+function rangeTo(i) {
+  const d = sel.drag;
+  if (!d || i == null) return;
+  const a = Math.min(d.anchor, i), b = Math.max(d.anchor, i);
+  sel.ids = new Set(d.base);
+  for (let k = a; k <= b; k++) { const id = gridList[k].id; if (d.target) sel.ids.add(id); else sel.ids.delete(id); }
+  renderSelection();
+}
+function cellIndexAt(x, y) {
+  const c = document.elementFromPoint(x, y)?.closest?.('#grid .cell');
+  return c ? gridIndex.get(c.dataset.id) : null;
+}
+function rangeMove(x, y) {
+  const d = sel.drag;
+  if (!d) return;
+  d.x = x; d.y = y;
+  rangeTo(cellIndexAt(x, y));
+  if (!d.raf) d.raf = requestAnimationFrame(autoScroll);
+}
+// Near the top or bottom edge, scroll while selecting (faster the closer you get).
+function autoScroll() {
+  const d = sel.drag;
+  if (!d) return;
+  d.raf = 0;
+  const edge = 110, top = d.y - edge, bottom = window.innerHeight - edge - d.y;
+  const v = top < 0 ? Math.max(-24, top / 4) : bottom < 0 ? Math.min(24, -bottom / 4) : 0;
+  if (v) {
+    window.scrollBy(0, v);
+    rangeTo(cellIndexAt(d.x, d.y));
+    d.raf = requestAnimationFrame(autoScroll);
+  }
+}
+function rangeEnd() {
+  if (sel.drag?.raf) cancelAnimationFrame(sel.drag.raf);
+  sel.drag = null;
+}
+
+function setupSelection() {
+  const grid = $('grid');
+  $('selectBtn').onclick = () => setSelecting(!sel.on);
+  $('selectAllBtn').onclick = () => {
+    const all = sel.ids.size === gridList.length;
+    sel.ids = all ? new Set() : new Set(gridList.map((p) => p.id));
+    renderSelection();
+  };
+
+  let mode = null, x0 = 0, y0 = 0, startIdx = null, pressTimer = 0;
+  const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  const startRangeHere = (i) => { sel.suppressClick = true; rangeBegin(i); };
+
+  grid.addEventListener('touchstart', (e) => {
+    clearTimeout(pressTimer);
+    if (e.touches.length === 1) sel.suppressClick = false;   // a fresh gesture
+    if (e.touches.length === 2) {
+      // Two-finger drag: turn on Select and select as the fingers move (iPhone shortcut).
+      e.preventDefault();
+      const m = mid(e.touches);
+      if (!sel.on) setSelecting(true);
+      mode = 'range';
+      startRangeHere(cellIndexAt(m.x, m.y));
+      return;
+    }
+    if (e.touches.length > 2) return;
+    const t = e.touches[0];
+    x0 = t.clientX; y0 = t.clientY;
+    startIdx = cellIndexAt(x0, y0);
+    if (startIdx == null) { mode = null; return; }
+    if (sel.on) { mode = 'decide'; return; }
+    // Long-press a photo: start selecting with it (and keep dragging to add more).
+    mode = 'press';
+    pressTimer = setTimeout(() => {
+      if (mode !== 'press') return;
+      setSelecting(true);
+      mode = 'range';
+      startRangeHere(startIdx);
+      if (navigator.vibrate) navigator.vibrate(10);
+    }, 450);
+  }, { passive: false });
+
+  grid.addEventListener('touchmove', (e) => {
+    if (!mode) return;
+    if (mode === 'range') {
+      e.preventDefault();
+      const p = e.touches.length >= 2 ? mid(e.touches) : { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      rangeMove(p.x, p.y);
+      return;
+    }
+    const t = e.touches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+    if (Math.hypot(dx, dy) < 8) return;
+    if (mode === 'press') { clearTimeout(pressTimer); mode = null; return; }   // it was a scroll
+    if (mode === 'decide') {
+      if (Math.abs(dx) > Math.abs(dy)) {   // sideways: select; up/down: let it scroll
+        e.preventDefault();
+        mode = 'range';
+        startRangeHere(startIdx);
+        rangeMove(t.clientX, t.clientY);
+      } else mode = null;
+    }
+  }, { passive: false });
+
+  const end = (e) => {
+    clearTimeout(pressTimer);
+    if (mode === 'range' && e.touches.length) return;   // a finger is still down
+    if (mode === 'range') rangeEnd();
+    mode = null;
+  };
+  grid.addEventListener('touchend', end);
+  grid.addEventListener('touchcancel', end);
+
+  // Mouse: while selecting, press and drag across photos.
+  let mouse = null;
+  grid.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'mouse' || !sel.on) return;
+    sel.suppressClick = false;
+    mouse = { x: e.clientX, y: e.clientY, i: cellIndexAt(e.clientX, e.clientY), dragging: false };
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!mouse || e.pointerType !== 'mouse') return;
+    if (!mouse.dragging && Math.hypot(e.clientX - mouse.x, e.clientY - mouse.y) > 6 && mouse.i != null) {
+      mouse.dragging = true;
+      startRangeHere(mouse.i);
+    }
+    if (mouse.dragging) rangeMove(e.clientX, e.clientY);
+  });
+  window.addEventListener('pointerup', () => { if (mouse?.dragging) rangeEnd(); mouse = null; });
 }
 
 /* ---------- Status changes ---------- */
@@ -1601,6 +1843,8 @@ function bind() {
     if (!cell) return;
     const p = photos.find((x) => x.id === cell.dataset.id);
     if (!p) return;
+    if (sel.suppressClick) { sel.suppressClick = false; return; }
+    if (sel.on) { toggleSelected(p.id); return; }
     if (p.status === 'pending') openSwiper(p.id);
     else openViewer(p);
   });
@@ -1619,6 +1863,7 @@ function bind() {
   });
 
   setupViewerGestures();
+  setupSelection();
 
   $('restoreAllBtn').onclick = async () => {
     const list = byStatus('trash');
@@ -1762,6 +2007,7 @@ async function init() {
 // and only then let the app close. Returns true if it handled the press.
 window.swipeCleanBack = () => {
   if (!$('viewer').classList.contains('hidden')) { closeViewer(); return true; }
+  if (sel.on) { setSelecting(false); return true; }
   if (!$('settings').classList.contains('hidden')) { $('settings').classList.add('hidden'); return true; }
   if (!$('swiper').classList.contains('hidden')) { closeSwiper(); return true; }
   if (tab !== 'pending') { setTab('pending'); return true; }
