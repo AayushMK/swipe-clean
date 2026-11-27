@@ -29,11 +29,27 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
+import android.content.ClipData;
+import android.graphics.Color;
+
+import androidx.core.content.FileProvider;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Reads the real photo library (photos + videos) and deletes items from it. JS name: PhotoLibrary
@@ -314,6 +330,325 @@ public class PhotoLibraryPlugin extends Plugin {
     public void cancelBusyCheck(PluginCall call) {
         BusyCheckReceiver.cancel(getContext());
         call.resolve();
+    }
+
+    // ---------- Sharing originals ----------
+
+    /** Shares the original gallery files (no copies), or one .zip of them (sent as a document). */
+    @PluginMethod
+    public void shareItems(PluginCall call) {
+        JSArray ids = call.getArray("ids", new JSArray());
+        boolean zip = Boolean.TRUE.equals(call.getBoolean("zip", false));
+        List<String> list = new ArrayList<>();
+        try { for (int i = 0; i < ids.length(); i++) list.add(ids.getString(i)); } catch (Exception e) { call.reject("Bad ids"); return; }
+        if (list.isEmpty()) { call.reject("Nothing to share"); return; }
+        getBridge().execute(() -> {
+            try {
+                ArrayList<Uri> uris = new ArrayList<>();
+                String type;
+                File shareDir = new File(getContext().getCacheDir(), "share");
+                cleanOldShares(shareDir);
+                if (zip) {
+                    shareDir.mkdirs();
+                    File out = new File(shareDir, "Swipe Clean photos.zip");
+                    writeZip(list, out);
+                    uris.add(FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", out));
+                    type = "application/zip";
+                } else {
+                    boolean anyVideo = false, anyImage = false;
+                    for (String id : list) { uris.add(uriFor(id)); if (isVideo(id)) anyVideo = true; else anyImage = true; }
+                    type = anyVideo && anyImage ? "*/*" : anyVideo ? "video/*" : "image/*";
+                }
+                Intent send = new Intent(uris.size() == 1 ? Intent.ACTION_SEND : Intent.ACTION_SEND_MULTIPLE);
+                send.setType(type);
+                if (uris.size() == 1) send.putExtra(Intent.EXTRA_STREAM, uris.get(0));
+                else send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+                ClipData clip = ClipData.newRawUri("", uris.get(0));
+                for (int i = 1; i < uris.size(); i++) clip.addItem(new ClipData.Item(uris.get(i)));
+                send.setClipData(clip);
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Intent chooser = Intent.createChooser(send, null);
+                getActivity().runOnUiThread(() -> {
+                    getActivity().startActivity(chooser);
+                    JSObject ret = new JSObject();
+                    ret.put("completed", true);
+                    call.resolve(ret);
+                });
+            } catch (Exception e) {
+                call.reject("Could not share", e);
+            }
+        });
+    }
+
+    private String displayName(Uri uri, String fallback) {
+        try (Cursor c = getContext().getContentResolver().query(uri, new String[] { MediaStore.MediaColumns.DISPLAY_NAME }, null, null, null)) {
+            if (c != null && c.moveToFirst() && c.getString(0) != null) return c.getString(0);
+        } catch (Exception ignored) { }
+        return fallback;
+    }
+
+    private void writeZip(List<String> ids, File out) throws Exception {
+        Set<String> taken = new HashSet<>();
+        try (ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(out)))) {
+            zos.setLevel(0);   // photos are already compressed: store them as they are
+            byte[] buf = new byte[64 * 1024];
+            for (String id : ids) {
+                Uri uri = uriFor(id);
+                String name = displayName(uri, id + (isVideo(id) ? ".mp4" : ".jpg"));
+                String base = name, ext = "";
+                int dot = name.lastIndexOf('.');
+                if (dot > 0) { base = name.substring(0, dot); ext = name.substring(dot); }
+                for (int n = 2; taken.contains(name.toLowerCase()); n++) name = base + " (" + n + ")" + ext;
+                taken.add(name.toLowerCase());
+                try (InputStream in = new BufferedInputStream(getContext().getContentResolver().openInputStream(uri))) {
+                    zos.putNextEntry(new ZipEntry("Swipe Clean photos/" + name));
+                    int r;
+                    while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
+                    zos.closeEntry();
+                }
+            }
+        }
+    }
+
+    // The receiving app reads the zip after we hand it over, so old ones are removed next time.
+    private static void cleanOldShares(File dir) {
+        File[] files = dir.listFiles();
+        if (files != null) for (File f : files) if (System.currentTimeMillis() - f.lastModified() > 3600_000L) f.delete();
+    }
+
+    // ---------- Similar photos ----------
+    // Phase 1 on Android: a small fingerprint per photo (shape hash + colour layout).
+    // Finds near-duplicates, bursts and same-scene photos. People needs the face model (phase 2).
+
+    private static final Map<String, long[]> prints = new HashMap<>();   // id -> [dHash, colour bytes packed in 6 longs]
+    private static boolean indexLoaded = false, indexing = false;
+    private final List<PluginCall> indexWaiters = new ArrayList<>();
+
+    private File indexFile() { return new File(getContext().getFilesDir(), "similarity-index.bin"); }
+
+    private void loadIndex() {
+        synchronized (prints) {
+            if (indexLoaded) return;
+            indexLoaded = true;
+            File f = indexFile();
+            if (!f.exists()) return;
+            try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f)))) {
+                int n = in.readInt();
+                for (int i = 0; i < n; i++) {
+                    String id = in.readUTF();
+                    long[] v = new long[7];
+                    for (int k = 0; k < 7; k++) v[k] = in.readLong();
+                    prints.put(id, v);
+                }
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private void saveIndex() {
+        synchronized (prints) {
+            try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(indexFile())))) {
+                out.writeInt(prints.size());
+                for (Map.Entry<String, long[]> e : prints.entrySet()) {
+                    out.writeUTF(e.getKey());
+                    for (long x : e.getValue()) out.writeLong(x);
+                }
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private long[] fingerprint(String id) {
+        try {
+            Bitmap small = load(id, 96);
+            if (small == null) return null;
+            Bitmap g = Bitmap.createScaledBitmap(small, 9, 8, true);
+            long hash = 0;
+            int bit = 0;
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+                if (lum(g.getPixel(x, y)) > lum(g.getPixel(x + 1, y))) hash |= (1L << bit);
+                bit++;
+            }
+            Bitmap c = Bitmap.createScaledBitmap(small, 4, 4, true);
+            long[] v = new long[7];
+            v[0] = hash;
+            int b = 0;
+            for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+                int p = c.getPixel(x, y);
+                int[] rgb = { Color.red(p), Color.green(p), Color.blue(p) };
+                for (int ch : rgb) { v[1 + b / 8] |= ((long) (ch & 0xff)) << ((b % 8) * 8); b++; }
+            }
+            return v;
+        } catch (Exception e) { return null; }
+    }
+
+    private static int lum(int p) { return (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000; }
+
+    private static double distance(long[] a, long[] b) {
+        double ham = Long.bitCount(a[0] ^ b[0]) / 64.0;
+        double sum = 0;
+        for (int i = 0; i < 48; i++) {
+            int x = (int) ((a[1 + i / 8] >>> ((i % 8) * 8)) & 0xff), y = (int) ((b[1 + i / 8] >>> ((i % 8) * 8)) & 0xff);
+            sum += (x - y) * (x - y);
+        }
+        double colour = Math.sqrt(sum / 48) / 255.0;
+        return ham * 0.6 + colour * 0.8;
+    }
+
+    private List<String> allIds() {
+        List<String> ids = new ArrayList<>();
+        String[] col = { MediaStore.MediaColumns._ID };
+        try (Cursor c = getContext().getContentResolver().query(IMAGES, col, null, null, MediaStore.MediaColumns.DATE_ADDED + " DESC")) {
+            if (c != null) while (c.moveToNext()) ids.add(String.valueOf(c.getLong(0)));
+        }
+        try (Cursor c = getContext().getContentResolver().query(VIDEOS, col, null, null, MediaStore.MediaColumns.DATE_ADDED + " DESC")) {
+            if (c != null) while (c.moveToNext()) ids.add("v" + c.getLong(0));
+        }
+        return ids;
+    }
+
+    @PluginMethod
+    public void indexLibrary(PluginCall call) {
+        synchronized (indexWaiters) {
+            indexWaiters.add(call);
+            if (indexing) return;
+            indexing = true;
+        }
+        new Thread(() -> {
+            loadIndex();
+            List<String> ids = allIds();
+            Set<String> live = new HashSet<>(ids);
+            synchronized (prints) { prints.keySet().retainAll(live); }
+            int total = ids.size(), done = 0;
+            for (String id : ids) {
+                boolean have;
+                synchronized (prints) { have = prints.containsKey(id); }
+                if (!have) {
+                    long[] v = fingerprint(id);
+                    if (v != null) synchronized (prints) { prints.put(id, v); }
+                }
+                done++;
+                if (done % 25 == 0) progress(done, total);
+                if (done % 500 == 0) saveIndex();
+            }
+            saveIndex();
+            progress(total, total);
+            List<PluginCall> ws;
+            synchronized (indexWaiters) { indexing = false; ws = new ArrayList<>(indexWaiters); indexWaiters.clear(); }
+            JSObject st = statusObj(total);
+            for (PluginCall w : ws) w.resolve(st);
+        }, "swipeclean-index").start();
+    }
+
+    private void progress(int done, int total) {
+        JSObject p = new JSObject();
+        p.put("done", done);
+        p.put("total", total);
+        notifyListeners("indexProgress", p);
+    }
+
+    private JSObject statusObj(int total) {
+        JSObject st = new JSObject();
+        synchronized (prints) { st.put("indexed", Math.min(prints.size(), total)); }
+        st.put("total", total);
+        st.put("faces", 0);
+        st.put("running", indexing);
+        return st;
+    }
+
+    @PluginMethod
+    public void indexStatus(PluginCall call) {
+        getBridge().execute(() -> { loadIndex(); call.resolve(statusObj(allIds().size())); });
+    }
+
+    @PluginMethod
+    public void findSimilar(PluginCall call) {
+        String id = call.getString("id");
+        int limit = call.getInt("limit", 80);
+        if (id == null) { call.reject("id is required"); return; }
+        getBridge().execute(() -> {
+            loadIndex();
+            long[] q;
+            synchronized (prints) { q = prints.get(id); }
+            if (q == null) { q = fingerprint(id); if (q != null) synchronized (prints) { prints.put(id, q); } }
+            JSArray matches = new JSArray();
+            if (q != null) {
+                List<Object[]> all = new ArrayList<>();
+                synchronized (prints) {
+                    for (Map.Entry<String, long[]> e : prints.entrySet()) {
+                        if (!e.getKey().equals(id)) all.add(new Object[] { e.getKey(), distance(q, e.getValue()) });
+                    }
+                }
+                all.sort((a, b) -> Double.compare((double) a[1], (double) b[1]));
+                for (int i = 0; i < Math.min(limit, all.size()); i++) {
+                    JSObject m = new JSObject();
+                    m.put("id", all.get(i)[0]);
+                    m.put("d", all.get(i)[1]);
+                    matches.put(m);
+                }
+            }
+            JSObject ret = new JSObject();
+            ret.put("matches", matches);
+            call.resolve(ret);
+        });
+    }
+
+    /** Duplicates and near-duplicates, compared with neighbours in date order. Best copy first. */
+    @PluginMethod
+    public void findDuplicates(PluginCall call) {
+        double maxD = call.getDouble("maxDistance", 0.2);
+        getBridge().execute(() -> {
+            loadIndex();
+            List<String> ordered = new ArrayList<>();
+            Map<String, long[]> snap;
+            synchronized (prints) { snap = new HashMap<>(prints); }
+            for (String id : allIds()) if (snap.containsKey(id)) ordered.add(id);
+            int n = ordered.size(), window = 40;
+            int[] parent = new int[n];
+            for (int i = 0; i < n; i++) parent[i] = i;
+            for (int i = 0; i < n; i++) {
+                long[] a = snap.get(ordered.get(i));
+                for (int j = i + 1; j < Math.min(n, i + window); j++) {
+                    if (isVideo(ordered.get(i)) != isVideo(ordered.get(j))) continue;
+                    if (distance(a, snap.get(ordered.get(j))) <= maxD) parent[root(parent, j)] = root(parent, i);
+                }
+            }
+            Map<Integer, List<String>> groups = new HashMap<>();
+            for (int i = 0; i < n; i++) groups.computeIfAbsent(root(parent, i), k -> new ArrayList<>()).add(ordered.get(i));
+            JSArray out = new JSArray();
+            for (List<String> g : groups.values()) {
+                if (g.size() < 2) continue;
+                // best copy first: most pixels, then biggest file
+                g.sort((x, y) -> {
+                    long[] mx = meta(x), my = meta(y);
+                    if (mx[0] != my[0]) return Long.compare(my[0], mx[0]);
+                    return Long.compare(my[1], mx[1]);
+                });
+                JSObject o = new JSObject();
+                o.put("ids", new JSArray(g));
+                out.put(o);
+            }
+            JSObject ret = new JSObject();
+            ret.put("groups", out);
+            call.resolve(ret);
+        });
+    }
+
+    private static int root(int[] p, int x) { while (p[x] != x) { p[x] = p[p[x]]; x = p[x]; } return x; }
+
+    /** [pixels, bytes] for ranking copies. */
+    private long[] meta(String id) {
+        try (Cursor c = getContext().getContentResolver().query(uriFor(id),
+                new String[] { MediaStore.MediaColumns.WIDTH, MediaStore.MediaColumns.HEIGHT, MediaStore.MediaColumns.SIZE }, null, null, null)) {
+            if (c != null && c.moveToFirst()) return new long[] { (long) c.getInt(0) * c.getInt(1), c.getLong(2) };
+        } catch (Exception ignored) { }
+        return new long[] { 0, 0 };
+    }
+
+    /** People needs the face model (phase 2); Android returns none for now. */
+    @PluginMethod
+    public void getPeople(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("people", new JSArray());
+        call.resolve(ret);
     }
 
     @PluginMethod

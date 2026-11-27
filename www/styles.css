@@ -356,3 +356,56 @@ html, body, button, .cell, .card { touch-action: manipulation; }
 .sel-bar button.keep { color: #062; background: var(--keep); }
 .sel-bar button:disabled { opacity: .4; }
 .selecting #app { padding-bottom: calc(var(--safe-bottom) + 90px); }
+
+/* People (iPhone): faces found on the phone, tap one to see that person's photos */
+.people { margin-top: 14px; }
+.people.hidden { display: none; }
+.people-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 2px 8px; }
+.people-head h2 { font-size: 17px; margin: 0; }
+.beta { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; vertical-align: 2px; }
+.people-body { display: flex; gap: 12px; overflow-x: auto; padding: 2px 2px 6px; scrollbar-width: none; }
+.people-body::-webkit-scrollbar { display: none; }
+.face-chip { flex: none; width: 68px; display: grid; justify-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+.face-chip img { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; background: var(--panel-2); border: 2px solid var(--line); }
+.face-chip:active img { transform: scale(.94); }
+.people-card { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; display: grid; gap: 10px; font-size: 14px; color: var(--muted); }
+.people-card b { color: var(--text); font-size: 15px; }
+.people-card .primary { justify-self: start; }
+.scan-bar { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+.scan-bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+
+/* Results of a person / similar search, shown instead of the tabs */
+.view-bar { display: flex; align-items: center; gap: 12px; margin: 16px 0 10px; }
+.view-bar.hidden { display: none; }
+.pv-close.small { width: 36px; height: 36px; background: var(--panel); }
+.pv-close.small svg { stroke: var(--text); }
+.view-face { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; }
+.view-face.hidden { display: none; }
+.view-text { display: grid; }
+.view-text b { font-size: 17px; }
+.view-text span { font-size: 13px; color: var(--muted); }
+.viewing .tabs, .viewing #people { display: none; }
+
+/* Viewer: share + similar buttons */
+.pv-tools { margin-left: auto; display: flex; gap: 10px; }
+
+/* Share options */
+.share-sheet { display: grid; gap: 10px; }
+.share-option { text-align: left; display: grid; gap: 4px; padding: 14px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); }
+.share-option b { font-size: 16px; color: var(--text); }
+.share-option span { font-size: 13px; color: var(--muted); line-height: 1.4; }
+.share-check { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; color: var(--muted); padding: 4px 2px; }
+.share-check input { margin-top: 2px; width: 18px; height: 18px; accent-color: var(--accent); }
+.share-check.hidden { display: none; }
+
+/* Tools (duplicates) */
+.tools-row { margin-top: 12px; }
+.tool-btn { width: 100%; display: flex; align-items: center; gap: 12px; text-align: left; padding: 12px 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.tool-btn svg { width: 24px; height: 24px; flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.tool-btn span { display: grid; }
+.tool-btn b { font-size: 15px; color: var(--text); }
+.tool-btn small { font-size: 13px; color: var(--muted); }
+.viewing .tools-row { display: none; }
+.cell.dup-first::before { content: 'Best'; position: absolute; left: 4px; top: 4px; z-index: 1; font-size: 11px; font-weight: 700;
+  padding: 2px 6px; border-radius: 6px; background: var(--keep); color: #062; }

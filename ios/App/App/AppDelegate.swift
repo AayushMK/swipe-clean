@@ -10,6 +10,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         BusyCheck.registerTask()   // "only on busy days" reminder runs in the background
         #if DEBUG
         // Test hook (debug builds only): launch with BUSY_TEST=1 to run the check after 5 s.
+        if ProcessInfo.processInfo.environment["INDEX_TEST"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                SimilarityIndex.shared.run(progress: { d, t in if d % 200 == 0 { NSLog("SwipeClean progress %d/%d", d, t) } }) { _ in
+                    DispatchQueue.global().async { SimilarityIndex.shared.debugSummary() }
+                }
+            }
+        }
         if ProcessInfo.processInfo.environment["BUSY_TEST"] != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { BusyCheck.check {} }
         }

@@ -5,6 +5,10 @@ import AVFoundation
 import Capacitor
 import BackgroundTasks
 import UserNotifications
+import Vision
+import Accelerate
+import ImageIO
+import UniformTypeIdentifiers
 
 /// "Only on busy days" reminder. iOS can't run an app at an exact time, so we ask for a
 /// background refresh no earlier than the chosen time; when iOS runs it, count the photos
@@ -104,6 +108,12 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "openPhotosApp", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getStorageInfo", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "scheduleBusyCheck", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "shareItems", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "indexLibrary", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "indexStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "findSimilar", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getPeople", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "findDuplicates", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancelBusyCheck", returnType: CAPPluginReturnPromise),
     ]
 
@@ -126,6 +136,12 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         for dir in [fullDir, videoDir] {
             try? fm.removeItem(at: dir)
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        // Copies made for sharing are deleted when the share sheet closes; if the app was
+        // closed mid-share, clean them up now.
+        for f in (try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil)) ?? []
+        where f.lastPathComponent.hasPrefix("share-") {
+            try? fm.removeItem(at: f)
         }
     }
 
@@ -345,6 +361,143 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    // MARK: Sharing originals
+
+    /// Shares the original files (best quality the phone has) through the system share sheet.
+    /// zip: one .zip (chat apps send it untouched, as a document). jpeg: convert HEIC to JPEG.
+    /// The copies live in a temporary folder that is deleted as soon as the sheet closes.
+    @objc func shareItems(_ call: CAPPluginCall) {
+        let ids = (call.getArray("ids") ?? []).compactMap { $0 as? String }
+        let zip = call.getBool("zip") ?? false
+        let jpeg = call.getBool("jpeg") ?? false
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var byId: [String: PHAsset] = [:]
+        fetched.enumerateObjects { a, _, _ in byId[a.localIdentifier] = a }
+        let assets = ids.compactMap { byId[$0] }
+        if assets.isEmpty { return call.reject("Nothing to share") }
+
+        let root = fm.temporaryDirectory.appendingPathComponent("share-\(UUID().uuidString)", isDirectory: true)
+        let folder = root.appendingPathComponent("Swipe Clean photos", isDirectory: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var urls = [URL?](repeating: nil, count: assets.count)
+            var taken = Set<String>()
+            for (i, a) in assets.enumerated() {
+                urls[i] = Self.exportOriginal(a, into: folder, jpeg: jpeg, taken: &taken)
+            }
+            var items: [URL] = urls.compactMap { $0 }
+            if items.isEmpty {
+                try? self.fm.removeItem(at: root)
+                return call.reject("Could not read the photos")
+            }
+            if zip, let z = Self.zipFolder(folder, to: root.appendingPathComponent("Swipe Clean photos.zip")) {
+                items = [z]
+            }
+            DispatchQueue.main.async {
+                let sheet = UIActivityViewController(activityItems: items, applicationActivities: nil)
+                sheet.completionWithItemsHandler = { type, completed, _, _ in
+                    try? self.fm.removeItem(at: root)
+                    self.notifyListeners("shareDone", data: ["completed": completed, "app": type?.rawValue ?? ""])
+                }
+                guard let vc = self.bridge?.viewController else { return call.reject("No window") }
+                if let pop = sheet.popoverPresentationController {   // iPad
+                    pop.sourceView = vc.view
+                    pop.sourceRect = CGRect(x: vc.view.bounds.midX, y: vc.view.bounds.maxY - 80, width: 1, height: 1)
+                }
+                vc.present(sheet, animated: true) { call.resolve(["presented": true]) }
+            }
+        }
+    }
+
+    /// Writes the asset's original file (the edited version if it was edited) into `folder`.
+    private static func exportOriginal(_ a: PHAsset, into folder: URL, jpeg: Bool, taken: inout Set<String>) -> URL? {
+        let res = PHAssetResource.assetResources(for: a)
+        let pick: PHAssetResource?
+        if a.mediaType == .video {
+            pick = res.first { $0.type == .fullSizeVideo } ?? res.first { $0.type == .video }
+        } else {
+            pick = res.first { $0.type == .fullSizePhoto } ?? res.first { $0.type == .photo }
+        }
+        guard let r = pick else { return nil }
+        let original = res.first { $0.type == .photo || $0.type == .video }?.originalFilename ?? r.originalFilename
+        let base = (original as NSString).deletingPathExtension
+        let ext = (r.originalFilename as NSString).pathExtension.isEmpty ? "jpg" : (r.originalFilename as NSString).pathExtension
+        var name = "\(base).\(ext)", n = 2
+        while taken.contains(name.lowercased()) { name = "\(base) (\(n)).\(ext)"; n += 1 }
+        taken.insert(name.lowercased())
+        let url = folder.appendingPathComponent(name)
+
+        let opts = PHAssetResourceRequestOptions()
+        opts.isNetworkAccessAllowed = true   // download from iCloud if needed
+        let sem = DispatchSemaphore(value: 0)
+        var failed = false
+        PHAssetResourceManager.default().writeData(for: r, toFile: url, options: opts) { err in
+            failed = err != nil; sem.signal()
+        }
+        sem.wait()
+        if failed { return nil }
+
+        // "Most compatible": HEIC → JPEG, keeping the photo's metadata (date, place, orientation).
+        if jpeg, a.mediaType == .image, ["heic", "heif"].contains(ext.lowercased()) {
+            let jpgURL = url.deletingPathExtension().appendingPathExtension("jpg")
+            if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+               let dst = CGImageDestinationCreateWithURL(jpgURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImageFromSource(dst, src, 0, [kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
+                if CGImageDestinationFinalize(dst) {
+                    try? FileManager.default.removeItem(at: url)
+                    return jpgURL
+                }
+            }
+        }
+        return url
+    }
+
+    /// Zips a folder using the system (no extra libraries).
+    private static func zipFolder(_ folder: URL, to dest: URL) -> URL? {
+        var result: URL?
+        var err: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: folder, options: [.forUploading], error: &err) { zipped in
+            try? FileManager.default.removeItem(at: dest)
+            if (try? FileManager.default.copyItem(at: zipped, to: dest)) != nil { result = dest }
+        }
+        return result
+    }
+
+    // MARK: Similar photos and people (all on the phone)
+
+    @objc func indexLibrary(_ call: CAPPluginCall) {
+        SimilarityIndex.shared.run(progress: { done, total in
+            self.notifyListeners("indexProgress", data: ["done": done, "total": total])
+        }) { status in call.resolve(status) }
+    }
+
+    @objc func indexStatus(_ call: CAPPluginCall) {
+        call.resolve(SimilarityIndex.shared.status())
+    }
+
+    @objc func findSimilar(_ call: CAPPluginCall) {
+        guard let id = call.getString("id") else { return call.reject("id is required") }
+        let limit = call.getInt("limit") ?? 80
+        DispatchQueue.global(qos: .userInitiated).async {
+            call.resolve(["matches": SimilarityIndex.shared.similar(to: id, limit: limit)])
+        }
+    }
+
+    @objc func getPeople(_ call: CAPPluginCall) {
+        let strict = call.getDouble("strictness") ?? 0.5
+        DispatchQueue.global(qos: .userInitiated).async {
+            call.resolve(["people": SimilarityIndex.shared.people(strictness: strict)])
+        }
+    }
+
+    @objc func findDuplicates(_ call: CAPPluginCall) {
+        let maxD = call.getDouble("maxDistance") ?? 0.3
+        DispatchQueue.global(qos: .userInitiated).async {
+            call.resolve(["groups": SimilarityIndex.shared.duplicates(maxDistance: Float(maxD))])
+        }
+    }
+
     @objc func scheduleBusyCheck(_ call: CAPPluginCall) {
         BusyCheck.schedule(hour: call.getInt("hour") ?? 20, minute: call.getInt("minute") ?? 0,
                            threshold: call.getInt("threshold") ?? 30)
@@ -363,5 +516,295 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             call.resolve()
         }
+    }
+}
+
+
+/// On-device index for "Similar photos" and "People".
+/// For every photo: Apple's image fingerprint (Vision feature print), plus the faces Vision
+/// finds and a fingerprint of each face. Only these numbers and small face thumbnails are kept;
+/// no photos are copied. Phase 1 compares faces with the general fingerprint, which is rough;
+/// a dedicated face model replaces it later.
+final class SimilarityIndex {
+    static let shared = SimilarityIndex()
+
+    struct Face: Codable { var box: [Double]; var print: Data }
+    struct Entry: Codable { var print: Data; var faces: [Face] }
+
+    private var index: [String: Entry] = [:]
+    private var loaded = false
+    private var running = false
+    private var waiters: [([String: Any]) -> Void] = []
+    private let queue = DispatchQueue(label: "swipeclean.index", qos: .utility)
+    private let lock = NSLock()
+    private let fm = FileManager.default
+
+    private var file: URL {
+        let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("similarity-index.plist")
+    }
+    private var faceDir: URL {
+        let d = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("faces", isDirectory: true)
+        try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    private func loadIfNeeded() {
+        lock.lock(); defer { lock.unlock() }
+        if loaded { return }
+        loaded = true
+        if let d = try? Data(contentsOf: file), let i = try? PropertyListDecoder().decode([String: Entry].self, from: d) { index = i }
+    }
+    private func save() {
+        lock.lock(); let snapshot = index; lock.unlock()
+        let enc = PropertyListEncoder(); enc.outputFormat = .binary
+        if let d = try? enc.encode(snapshot) { try? d.write(to: file, options: .atomic) }
+    }
+
+    private func allAssets() -> PHFetchResult<PHAsset> {
+        let opts = PHFetchOptions()
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        opts.predicate = NSPredicate(format: "mediaType == %d || mediaType == %d",
+                                     PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+        return PHAsset.fetchAssets(with: opts)
+    }
+
+    func status() -> [String: Any] {
+        loadIfNeeded()
+        let total = allAssets().count
+        lock.lock(); let n = index.count; let faces = index.values.reduce(0) { $0 + $1.faces.count }; lock.unlock()
+        return ["indexed": min(n, total), "total": total, "faces": faces, "running": running]
+    }
+
+    func run(progress: @escaping (Int, Int) -> Void, done: @escaping ([String: Any]) -> Void) {
+        loadIfNeeded()
+        lock.lock()
+        waiters.append(done)
+        if running { lock.unlock(); return }
+        running = true
+        lock.unlock()
+        queue.async {
+            let assets = self.allAssets()
+            var live = Set<String>()
+            var todo: [PHAsset] = []
+            assets.enumerateObjects { a, _, _ in
+                live.insert(a.localIdentifier)
+                if self.index[a.localIdentifier] == nil { todo.append(a) }
+            }
+            self.lock.lock()
+            for id in self.index.keys where !live.contains(id) { self.index.removeValue(forKey: id) }   // deleted elsewhere
+            self.lock.unlock()
+            let total = assets.count
+            var done = total - todo.count
+            progress(done, total)
+            for a in todo {
+                autoreleasepool {
+                    if let e = self.analyze(a) {
+                        self.lock.lock(); self.index[a.localIdentifier] = e; self.lock.unlock()
+                    }
+                }
+                done += 1
+                if done % 20 == 0 { progress(done, total) }
+                if done % 300 == 0 { self.save() }
+            }
+            self.save()
+            progress(total, total)
+            self.lock.lock()
+            self.running = false
+            let ws = self.waiters; self.waiters = []
+            self.lock.unlock()
+            let st = self.status()
+            ws.forEach { $0(st) }
+        }
+    }
+
+    private func image(for a: PHAsset, size: CGFloat) -> CGImage? {
+        let opts = PHImageRequestOptions()
+        opts.isSynchronous = true
+        opts.deliveryMode = .highQualityFormat
+        opts.resizeMode = .fast
+        opts.isNetworkAccessAllowed = false   // don't download the whole library from iCloud
+        var out: CGImage?
+        PHImageManager.default().requestImage(for: a, targetSize: CGSize(width: size, height: size),
+                                              contentMode: .aspectFit, options: opts) { img, _ in out = img?.cgImage }
+        return out
+    }
+
+    private static func vector(_ o: VNFeaturePrintObservation) -> Data {
+        var floats = [Float](repeating: 0, count: o.elementCount)
+        if o.elementType == .float {
+            o.data.withUnsafeBytes { raw in for i in 0..<o.elementCount { floats[i] = raw.load(fromByteOffset: i * 4, as: Float.self) } }
+        } else {
+            o.data.withUnsafeBytes { raw in for i in 0..<o.elementCount { floats[i] = Float(raw.load(fromByteOffset: i * 8, as: Double.self)) } }
+        }
+        // normalise so distances are comparable
+        let len = sqrt(floats.reduce(0) { $0 + $1 * $1 })
+        if len > 0 { for i in floats.indices { floats[i] /= len } }
+        return floats.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    private func analyze(_ a: PHAsset) -> Entry? {
+        guard let cg = image(for: a, size: 1024) else { NSLog("SwipeClean index: no image for %@", a.localIdentifier); return nil }
+        let printReq = Self.cpuOnSimulator(VNGenerateImageFeaturePrintRequest())
+        let faceReq = Self.cpuOnSimulator(VNDetectFaceRectanglesRequest())
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        do { try handler.perform(a.mediaType == .image ? [printReq, faceReq] : [printReq]) } catch {
+            NSLog("SwipeClean index: vision failed %@", error.localizedDescription); return nil
+        }
+        guard let fp = printReq.results?.first as? VNFeaturePrintObservation else { return nil }
+        var faces: [Face] = []
+        let W = CGFloat(cg.width), H = CGFloat(cg.height)
+        for (k, f) in (faceReq.results ?? []).enumerated() where f.boundingBox.width > 0.06 && f.confidence > 0.6 {
+            // Vision boxes are normalised with the origin at the bottom-left.
+            let b = f.boundingBox
+            let side = max(b.width * W, b.height * H) * 1.35
+            let cx = b.midX * W, cy = (1 - b.midY) * H
+            let rect = CGRect(x: cx - side / 2, y: cy - side / 2, width: side, height: side)
+                .intersection(CGRect(x: 0, y: 0, width: W, height: H))
+            guard rect.width > 20, let crop = cg.cropping(to: rect) else { continue }
+            let req = Self.cpuOnSimulator(VNGenerateImageFeaturePrintRequest())
+            try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([req])
+            guard let o = req.results?.first as? VNFeaturePrintObservation else { continue }
+            faces.append(Face(box: [b.minX, 1 - b.maxY, b.width, b.height], print: Self.vector(o)))
+            saveThumb(crop, name: Self.faceName(a.localIdentifier, k: faces.count - 1))
+        }
+        return Entry(print: Self.vector(fp), faces: faces)
+    }
+
+    #if DEBUG
+    /// Test hook: numbers only (no images), to tune the match thresholds on a real phone.
+    func debugSummary() {
+        lock.lock(); let all = index; lock.unlock()
+        let faces = all.values.reduce(0) { $0 + $1.faces.count }
+        NSLog("SwipeClean summary: indexed=%d faces=%d", all.count, faces)
+        for id in all.keys.sorted().prefix(6) {
+            let d = similar(to: id, limit: 8).compactMap { ($0["d"] as? Double).map { String(format: "%.3f", $0) } }
+            NSLog("SwipeClean nearest: %@", d.joined(separator: " "))
+        }
+        for (k, v) in [("dups", 0.27)] { NSLog("SwipeClean %@ groups=%d", k, duplicates(maxDistance: Float(v)).count) }
+        for s in [0.25, 0.5, 0.75] {
+            let p = people(strictness: s)
+            NSLog("SwipeClean people strict=%.2f groups=%d sizes=%@", s, p.count, p.prefix(12).map { "\($0["count"] ?? 0)" }.joined(separator: ","))
+        }
+    }
+    #endif
+
+    /// The simulator has no Neural Engine/GPU path for Vision models; real phones don't need this.
+    static func cpuOnSimulator<T: VNRequest>(_ r: T) -> T {
+        #if targetEnvironment(simulator)
+        r.usesCPUOnly = true
+        #endif
+        return r
+    }
+
+    static func faceName(_ id: String, k: Int) -> String {
+        id.map { $0.isLetter || $0.isNumber ? String($0) : "_" }.joined() + "_\(k).jpg"
+    }
+    private func saveThumb(_ cg: CGImage, name: String) {
+        let size: CGFloat = 120
+        let r = UIGraphicsImageRenderer(size: CGSize(width: size, height: size))
+        let img = r.image { _ in UIImage(cgImage: cg).draw(in: CGRect(x: 0, y: 0, width: size, height: size)) }
+        if let d = img.jpegData(compressionQuality: 0.8) { try? d.write(to: faceDir.appendingPathComponent(name)) }
+    }
+
+    private static func distance(_ a: Data, _ b: Data) -> Float {
+        a.withUnsafeBytes { pa in b.withUnsafeBytes { pb in
+            let x = pa.bindMemory(to: Float.self), y = pb.bindMemory(to: Float.self)
+            var s: Float = 0
+            for i in 0..<min(x.count, y.count) { let d = x[i] - y[i]; s += d * d }
+            return sqrt(s)
+        } }
+    }
+
+    /// Closest photos to `id`, nearest first. Indexes the photo itself first if needed.
+    func similar(to id: String, limit: Int) -> [[String: Any]] {
+        loadIfNeeded()
+        lock.lock(); var q = index[id]; lock.unlock()
+        if q == nil, let a = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject, let e = analyze(a) {
+            lock.lock(); index[id] = e; lock.unlock(); q = e
+        }
+        guard let query = q else { return [] }
+        lock.lock(); let all = index; lock.unlock()
+        return all.compactMap { (k, e) -> (String, Float)? in k == id ? nil : (k, Self.distance(query.print, e.print)) }
+            .sorted { $0.1 < $1.1 }
+            .prefix(limit)
+            .map { ["id": $0.0, "d": Double($0.1)] }
+    }
+
+    /// Duplicates and near-duplicates: each photo is compared with its neighbours in date
+    /// order (copies saved twice keep their date, bursts sit together). Best copy first.
+    func duplicates(maxDistance: Float) -> [[String: Any]] {
+        loadIfNeeded()
+        lock.lock(); let all = index; lock.unlock()
+        var ordered: [PHAsset] = []
+        allAssets().enumerateObjects { a, _, _ in if all[a.localIdentifier] != nil { ordered.append(a) } }
+        let n = ordered.count, window = 40
+        var parent = Array(0..<n)
+        func find(_ x: Int) -> Int { var x = x; while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x] }; return x }
+        for i in 0..<n {
+            guard let pi = all[ordered[i].localIdentifier]?.print else { continue }
+            for j in (i + 1)..<min(n, i + window) {
+                // photos and videos never count as duplicates of each other
+                if ordered[i].mediaType != ordered[j].mediaType { continue }
+                guard let pj = all[ordered[j].localIdentifier]?.print else { continue }
+                if Self.distance(pi, pj) <= maxDistance { parent[find(j)] = find(i) }
+            }
+        }
+        var groups: [Int: [PHAsset]] = [:]
+        for i in 0..<n { groups[find(i), default: []].append(ordered[i]) }
+        return groups.values.filter { $0.count >= 2 }
+            .map { g in g.sorted { a, b in
+                let pa = a.pixelWidth * a.pixelHeight, pb = b.pixelWidth * b.pixelHeight
+                if pa != pb { return pa > pb }
+                if a.isFavorite != b.isFavorite { return a.isFavorite }
+                return (a.creationDate ?? .distantPast) < (b.creationDate ?? .distantPast)
+            } }
+            .sorted { ($0.first?.creationDate ?? .distantPast) > ($1.first?.creationDate ?? .distantPast) }
+            .map { ["ids": $0.map { $0.localIdentifier }] }
+    }
+
+    /// Groups faces that look alike. strictness 0…1 (higher = only very close matches).
+    /// Faces are unit vectors, so closeness is a dot product (done with Accelerate).
+    func people(strictness: Double) -> [[String: Any]] {
+        loadIfNeeded()
+        lock.lock(); let all = index; lock.unlock()
+        // distance between unit vectors: d² = 2 − 2·cos. Tuned on a real library (phase 1, rough).
+        let maxD = Float(0.68 - 0.36 * strictness)
+        let minCos = 1 - maxD * maxD / 2
+        var centroids: [[Float]] = []        // normalised running means
+        var sums: [[Float]] = []
+        var members: [[(String, Int)]] = []
+        for (id, e) in all.sorted(by: { $0.key < $1.key }) {
+            for (k, f) in e.faces.enumerated() {
+                let v: [Float] = f.print.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+                var best = -1, bestCos: Float = -2
+                v.withUnsafeBufferPointer { vp in
+                    for (gi, c) in centroids.enumerated() {
+                        var dot: Float = 0
+                        c.withUnsafeBufferPointer { cp in vDSP_dotpr(vp.baseAddress!, 1, cp.baseAddress!, 1, &dot, vDSP_Length(min(vp.count, cp.count))) }
+                        if dot > bestCos { bestCos = dot; best = gi }
+                    }
+                }
+                if best >= 0 && bestCos >= minCos {
+                    vDSP_vadd(sums[best], 1, v, 1, &sums[best], 1, vDSP_Length(v.count))
+                    var norm: Float = 0
+                    vDSP_svesq(sums[best], 1, &norm, vDSP_Length(v.count))
+                    var scale = 1 / max(sqrt(norm), 1e-6)
+                    vDSP_vsmul(sums[best], 1, &scale, &centroids[best], 1, vDSP_Length(v.count))
+                    members[best].append((id, k))
+                } else {
+                    centroids.append(v); sums.append(v); members.append([(id, k)])
+                }
+            }
+        }
+        let dir = faceDir
+        return members.compactMap { m -> [String: Any]? in
+            let ids = Array(Set(m.map { $0.0 }))
+            guard ids.count >= 3 else { return nil }   // a "person" needs a few photos
+            return ["ids": ids, "count": ids.count, "thumb": dir.appendingPathComponent(Self.faceName(m[0].0, k: m[0].1)).absoluteString]
+        }
+        .sorted { ($0["count"] as! Int) > ($1["count"] as! Int) }
+        .prefix(40).map { $0 }
     }
 }
