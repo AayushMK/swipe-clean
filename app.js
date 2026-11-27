@@ -16,7 +16,7 @@ const REMINDER_ID = 1001;
 
 /* ---------- Settings & daily stats (localStorage) ---------- */
 
-const DEFAULTS = { dailyGoal: 100, retentionDays: 10, reminderTime: '20:00', reminderOn: false };
+const DEFAULTS = { dailyGoal: 100, retentionDays: 10, reminderTime: '20:00', reminderOn: false, sortOrder: 'newest' };
 const DAY = 24 * 60 * 60 * 1000;
 
 const settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('settings') || '{}') };
@@ -90,10 +90,53 @@ function forget(ids) {
   });
 }
 
+// Order of "To review" (the grid and the swipe view).
+const SORTS = {
+  newest: 'Newest first',
+  oldest: 'Oldest first',
+  random: 'Random',
+  largest: 'Largest first',
+  screenshots: 'Screenshots first',
+  videos: 'Videos first',
+  onthisday: 'On this day',
+};
+if (!SORTS[settings.sortOrder]) settings.sortOrder = DEFAULTS.sortOrder;
+
+// Random order stays the same while the app is open (so the grid and the
+// swipe view agree) and changes on every launch or when you tap Shuffle.
+const randKeys = new Map();
+const randKey = (p) => {
+  if (!randKeys.has(p.id)) randKeys.set(p.id, Math.random());
+  return randKeys.get(p.id);
+};
+
+// Days between a photo's month/day and today's, ignoring the year.
+function daysFromToday(t) {
+  if (!t) return 999;
+  const d = new Date(t), now = new Date();
+  const a = Date.UTC(2001, d.getMonth(), d.getDate()), b = Date.UTC(2001, now.getMonth(), now.getDate());
+  const diff = Math.abs(a - b) / DAY;
+  return Math.min(diff, 365 - diff);
+}
+
+function sortPending(list) {
+  const newest = (a, b) => b.taken - a.taken;
+  const by = {
+    newest,
+    oldest: (a, b) => a.taken - b.taken,
+    random: (a, b) => randKey(a) - randKey(b),
+    largest: (a, b) => (b.size ?? -1) - (a.size ?? -1) || newest(a, b),
+    screenshots: (a, b) => (!!b.screenshot - !!a.screenshot) || newest(a, b),
+    videos: (a, b) => (isVideo(b) - isVideo(a)) || newest(a, b),
+    onthisday: (a, b) => daysFromToday(a.taken) - daysFromToday(b.taken) || newest(a, b),
+  }[settings.sortOrder] || newest;
+  return list.sort(by);
+}
+
 function sortList(list, status) {
   if (status === 'trash') return list.sort((a, b) => b.trashedAt - a.trashedAt);
   if (status === 'kept') return list.sort((a, b) => b.reviewedAt - a.reviewedAt);
-  return list.sort((a, b) => b.taken - a.taken);
+  return sortPending(list);
 }
 
 function daysLeft(p) {
@@ -184,6 +227,9 @@ async function purgeExpired({ force = false } = {}) {
 
 /* ---------- Native library sync ---------- */
 
+// iOS reads file sizes during the storage scan (too slow to do while listing photos).
+let sizeCache = {};
+
 async function syncNativeLibrary() {
   let lib = [];
   try { ({ photos: lib } = await Lib.getPhotos()); } catch (e) { console.error(e); }
@@ -194,7 +240,8 @@ async function syncNativeLibrary() {
     const s = stored.get(a.id);
     return {
       id: a.id, name: '', taken: a.taken || 0, width: a.width, height: a.height,
-      kind: a.type === 'video' ? 'video' : 'image', duration: a.duration, size: a.size,
+      kind: a.type === 'video' ? 'video' : 'image', duration: a.duration, size: a.size ?? sizeCache[a.id],
+      screenshot: !!a.screenshot,
       status: s?.status || 'pending', reviewedAt: s?.reviewedAt || 0, trashedAt: s?.trashedAt || 0,
     };
   });
@@ -271,6 +318,7 @@ async function importFiles(fileList) {
       const meta = {
         id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         sig, name: f.name, size: f.size, type: f.type, kind: video ? 'video' : 'image', duration,
+        screenshot: /screen ?shot|screenshot|screen ?record/i.test(f.name),
         taken: f.lastModified || Date.now(), addedAt: Date.now(),
         status: 'pending', reviewedAt: 0, trashedAt: 0, thumb,
       };
@@ -401,6 +449,9 @@ function renderGrid() {
     }
   }
 
+  $('sortBar').classList.toggle('hidden', tab !== 'pending' || gridList.length < 2);
+  $('sortSelect').value = settings.sortOrder;
+  $('shuffleBtn').classList.toggle('hidden', settings.sortOrder !== 'random');
   $('trashBar').classList.toggle('hidden', tab !== 'trash' || !gridList.length);
   $('photosTrashHint').classList.toggle('hidden', !IOS || tab !== 'trash');
   $('trashInfo').textContent = NATIVE
@@ -421,6 +472,12 @@ async function refreshStorage() {
   renderStorage();
   try {
     storage = await Lib.getStorageInfo();
+    if (storage.sizes) {
+      sizeCache = storage.sizes;
+      delete storage.sizes;
+      photos.forEach((p) => { if (sizeCache[p.id] != null) p.size = sizeCache[p.id]; });
+      if (tab === 'pending' && settings.sortOrder === 'largest') renderGrid();
+    }
     localStorage.setItem('storageInfo', JSON.stringify(storage));
   } catch (e) { console.error(e); }
   storageLoading = false;
@@ -1203,8 +1260,22 @@ function bind() {
   });
 }
 
+function setupSort() {
+  const sel = $('sortSelect');
+  sel.innerHTML = Object.entries(SORTS).map(([v, label]) => `<option value="${v}">${label}</option>`).join('');
+  sel.onchange = () => {
+    settings.sortOrder = sel.value;
+    saveSettings();
+    if (settings.sortOrder === 'random') randKeys.clear();
+    renderGrid();
+    $('gridWrap').scrollIntoView({ block: 'nearest' });
+  };
+  $('shuffleBtn').onclick = () => { randKeys.clear(); renderGrid(); };
+}
+
 async function init() {
   bind();
+  setupSort();
   setupInstallHint();
   if (NATIVE) {
     document.body.classList.add('native');

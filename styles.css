@@ -75,6 +75,16 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .tab b { font-weight: 600; opacity: .7; margin-left: 2px; }
 .tab.active { background: var(--panel-2); color: var(--text); }
 
+/* Order of To review */
+.sort-bar { display: flex; align-items: center; gap: 10px; margin: 0 2px 10px; font-size: 13px; color: var(--muted); }
+.select-pill { position: relative; }
+.select-pill::after { content: '▾'; position: absolute; right: 11px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--muted); font-size: 12px; }
+.select-pill select {
+  appearance: none; -webkit-appearance: none; font: inherit; font-size: 14px; font-weight: 600;
+  color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 7px 30px 7px 13px;
+}
+.sort-bar .link { margin-left: auto; }
+
 .trash-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--muted); margin: 0 2px 10px; flex-wrap: wrap; }
 
 /* Grid */
