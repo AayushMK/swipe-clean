@@ -59,10 +59,37 @@
       <div class="storage-sub"><span id="storageSub"></span><span>All time cleaned: <b id="cleanedAll">0 MB</b></span></div>
     </section>
 
+    <section class="people hidden" id="people">
+      <div class="people-head">
+        <h2>People <span class="beta">beta</span></h2>
+        <div class="select-pill hidden" id="matchPill"><select id="matchSelect" aria-label="How close a match">
+          <option value="0.25">Loose match</option>
+          <option value="0.5" selected>Normal match</option>
+          <option value="0.75">Strict match</option>
+        </select></div>
+      </div>
+      <div class="people-body" id="peopleBody"></div>
+    </section>
+
+    <div class="tools-row native-only">
+      <button type="button" class="tool-btn" id="dupBtn">
+        <svg viewBox="0 0 24 24"><rect x="3" y="7" width="11" height="11" rx="2"/><path d="M8 4h11a2 2 0 0 1 2 2v11"/></svg>
+        <span><b>Find duplicates</b><small>Copies and near-identical shots</small></span>
+      </button>
+    </div>
+
     <div class="install-hint hidden" id="installHint">
       <span id="installText"></span>
       <button class="link" id="installBtn">Install</button>
       <button class="link muted" id="installDismiss" aria-label="Dismiss">✕</button>
+    </div>
+
+    <div class="view-bar hidden" id="viewBar">
+      <button type="button" class="pv-close small" id="viewClose" aria-label="Back to all photos">
+        <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <img class="view-face hidden" id="viewFace" alt="" />
+      <div class="view-text"><b id="viewTitle"></b><span id="viewSub"></span></div>
     </div>
 
     <nav class="tabs" role="tablist">
@@ -150,6 +177,26 @@
   </div>
 
   <!-- Photo viewer / actions for kept & deleted -->
+  <div class="sheet-backdrop hidden" id="shareSheet">
+    <div class="sheet share-sheet" role="dialog" aria-labelledby="shareTitle">
+      <div class="sheet-head">
+        <h2 id="shareTitle">Share</h2>
+        <button type="button" class="icon-btn" id="shareClose" aria-label="Close">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <button type="button" class="share-option" id="shareMedia">
+        <b>Share photos</b>
+        <span>For WhatsApp, Instagram, Messages and more. Sends the originals; the app you pick may shrink them. In WhatsApp, tap HD before sending.</span>
+      </button>
+      <button type="button" class="share-option" id="shareZip">
+        <b>Send as one .zip file</b>
+        <span>Original quality, nothing shrunk. WhatsApp and email send it as a document; your friend unzips it to get every photo.</span>
+      </button>
+      <label class="share-check" id="jpegRow"><input type="checkbox" id="shareJpeg" /> <span>Convert iPhone HEIC photos to JPEG (opens on any phone or computer)</span></label>
+    </div>
+  </div>
+
   <div class="sel-bar hidden" id="selBar" role="toolbar" aria-label="Selected photos"></div>
 
   <div class="photo-viewer hidden" id="viewer" role="dialog" aria-modal="true" aria-label="Photo">
@@ -162,6 +209,14 @@
         <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
       <div class="pv-meta" id="viewerMeta"></div>
+      <div class="pv-tools">
+        <button type="button" class="pv-close" id="viewerSimilar" aria-label="Find similar photos" title="Find similar">
+          <svg viewBox="0 0 24 24"><rect x="3" y="7" width="11" height="11" rx="2"/><path d="M8 4h11a2 2 0 0 1 2 2v11"/></svg>
+        </button>
+        <button type="button" class="pv-close" id="viewerShare" aria-label="Share" title="Share">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg>
+        </button>
+      </div>
     </div>
     <div class="pv-bottom" id="viewerActions"></div>
   </div>

@@ -417,6 +417,7 @@ function makeCell(p) {
   check.className = 'check';
   cell.append(check);
   if (sel.ids.has(p.id)) cell.classList.add('sel');
+  if (view?.kind === 'dups' && view.groups.some((g) => g[0] === p.id)) cell.classList.add('dup-first');
   if (tab === 'trash') {
     const left = daysLeft(p);
     const b = document.createElement('span');
@@ -437,7 +438,12 @@ function appendCells() {
 }
 
 function renderGrid() {
-  gridList = sortList(byStatus(tab), tab);
+  if (view) {
+    const byId = new Map(photos.map((p) => [p.id, p]));
+    gridList = view.ids.map((id) => byId.get(id)).filter((p) => p && p.status !== 'trash');
+  } else {
+    gridList = sortList(byStatus(tab), tab);
+  }
   gridIndex = new Map(gridList.map((p, i) => [p.id, i]));
   for (const id of sel.ids) if (!gridIndex.has(id)) sel.ids.delete(id);
   gridShown = 0;
@@ -468,12 +474,13 @@ function renderGrid() {
 
   $('gridTools').classList.toggle('hidden', !gridList.length);
   if (!gridList.length && sel.on) setSelecting(false);
-  $('sortBar').classList.toggle('hidden', tab !== 'pending' || gridList.length < 2 || sel.on);
+  $('sortBar').classList.toggle('hidden', !!view || tab !== 'pending' || gridList.length < 2 || sel.on);
   renderSelection();
   $('sortSelect').value = settings.sortOrder;
   $('shuffleBtn').classList.toggle('hidden', settings.sortOrder !== 'random');
-  $('trashBar').classList.toggle('hidden', tab !== 'trash' || !gridList.length);
-  $('photosTrashHint').classList.toggle('hidden', !IOS || tab !== 'trash');
+  $('trashBar').classList.toggle('hidden', !!view || tab !== 'trash' || !gridList.length);
+  $('photosTrashHint').classList.toggle('hidden', !!view || !IOS || tab !== 'trash');
+  renderViewBar();
   $('trashInfo').textContent = NATIVE
     ? `Deleted from your phone after ${plural(settings.retentionDays, 'day')}`
     : `Removed for good after ${plural(settings.retentionDays, 'day')}`;
@@ -590,6 +597,7 @@ function setupTabSwipe() {
 
 function setTab(t) {
   if (sel.on) setSelecting(false);
+  if (view) { view = null; document.body.classList.remove('viewing'); }
   tab = t;
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   render();
@@ -608,7 +616,7 @@ function setSelecting(on) {
   sel.drag = null;
   if (!on) sel.ids.clear();
   document.body.classList.toggle('selecting', on);
-  $('sortBar').classList.toggle('hidden', tab !== 'pending' || gridList.length < 2 || on);
+  $('sortBar').classList.toggle('hidden', !!view || tab !== 'pending' || gridList.length < 2 || on);
   renderSelection();
 }
 
@@ -630,13 +638,15 @@ function renderSelection() {
   const bar = $('selBar');
   bar.classList.toggle('hidden', !sel.on);
   if (!sel.on) return;
+  const key = view ? 'view' : tab;
   const actions = {
-    pending: [['Delete', 'trash', 'trash'], ['Keep', 'keep', 'kept']],
-    kept: [['Back to review', '', 'pending'], ['Delete', 'trash', 'trash']],
+    pending: [['Share', '', 'share'], ['Delete', 'trash', 'trash'], ['Keep', 'keep', 'kept']],
+    kept: [['Share', '', 'share'], ['Back to review', '', 'pending'], ['Delete', 'trash', 'trash']],
     trash: [['Restore', '', 'kept'], [NATIVE ? 'Delete from phone' : 'Delete permanently', 'trash', 'forever']],
-  }[tab];
-  if (bar.dataset.tab !== tab) {
-    bar.dataset.tab = tab;
+    view: [['Share', 'keep', 'share'], ['Delete', 'trash', 'trash']],
+  }[key];
+  if (bar.dataset.tab !== key) {
+    bar.dataset.tab = key;
     bar.textContent = '';
     actions.forEach(([label, cls, to]) => {
       const b = document.createElement('button');
@@ -669,6 +679,7 @@ async function applyToSelected(to) {
   const list = selectedPhotos();
   if (!list.length) return;
   const from = tab, n = list.length, what = itemWord(n, list);
+  if (to === 'share') { openShare(list); return; }
   if (to === 'forever') {
     if (!NATIVE && !confirm(`Remove ${what} for good? This can't be undone.`)) return;
     const ok = await removeForever(list.map((p) => p.id));
@@ -676,15 +687,17 @@ async function applyToSelected(to) {
     if (ok) deletedToast(`Deleted ${what}`); else toast('Not deleted');
     return;
   }
+  const before = new Map(list.map((p) => [p.id, p.status]));
+  const reviewed = to === 'pending' ? 0 : list.filter((p) => p.status === 'pending').length;
   await setStatusMany(list, to);
-  if (from === 'pending') bumpToday(n);   // reviewing counts toward today's goal
+  bumpToday(reviewed);   // reviewing counts toward today's goal
   setSelecting(false); render();
-  const done = { trash: `Moved ${what} to Deleted`, kept: from === 'trash' ? `Restored ${what}` : `Kept ${what}`, pending: `Moved ${what} back to To review` }[to];
+  const done = { trash: `Moved ${what} to Deleted`, kept: from === 'trash' && !view ? `Restored ${what}` : `Kept ${what}`, pending: `Moved ${what} back to To review` }[to];
   toast(done, {
     label: 'Undo',
     fn: async () => {
-      await setStatusMany(list, from);
-      if (from === 'pending') bumpToday(-n);
+      for (const st of new Set(before.values())) await setStatusMany(list.filter((p) => before.get(p.id) === st), st);
+      bumpToday(-reviewed);
       render();
     },
   });
@@ -822,6 +835,236 @@ function setupSelection() {
     if (mouse.dragging) rangeMove(e.clientX, e.clientY);
   });
   window.addEventListener('pointerup', () => { if (mouse?.dragging) rangeEnd(); mouse = null; });
+}
+
+
+/* ---------- Results view: one person, or photos similar to one ---------- */
+
+let view = null;   // { kind: 'person' | 'similar', title, face, ids, queryId }
+
+function openView(v) {
+  if (sel.on) setSelecting(false);
+  view = v;
+  document.body.classList.add('viewing');
+  render();
+  window.scrollTo({ top: 0 });
+}
+
+function closeView() {
+  if (sel.on) setSelecting(false);
+  view = null;
+  document.body.classList.remove('viewing');
+  render();
+}
+
+function renderViewBar() {
+  $('viewBar').classList.toggle('hidden', !view);
+  if (!view) return;
+  $('viewTitle').textContent = view.title;
+  const n = gridList.length;
+  const scanning = indexState?.running ? ' · still scanning, more may appear' : '';
+  if (view.kind === 'dups') {
+    const extra = view.groups.reduce((a, g) => a + g.length - 1, 0);
+    $('viewSub').textContent = view.groups.length
+      ? `${plural(view.groups.length, 'group')} · ${extra} extra ${extra === 1 ? 'copy' : 'copies'} selected — check, then Delete${scanning}`
+      : (indexState?.running ? 'Still scanning your photos — duplicates will appear here' : 'No duplicates found 🎉');
+  } else {
+    $('viewSub').textContent = (n ? `${itemWord(n, gridList)}` : 'No matches yet') + (n ? ' · Select to share or delete' : '') + scanning;
+  }
+  $('viewFace').classList.toggle('hidden', !view.face);
+  if (view.face) $('viewFace').src = view.face;
+}
+
+/* ---------- Sharing (originals, never kept by the app) ---------- */
+
+let shareList = [];
+function openShare(list) {
+  if (!list.length) return;
+  shareList = list;
+  $('shareTitle').textContent = `Share ${itemWord(list.length, list)}`;
+  $('shareZip').classList.toggle('hidden', !NATIVE);
+  $('jpegRow').classList.toggle('hidden', !IOS || list.every(isVideo));
+  $('shareJpeg').checked = localStorage.getItem('shareJpeg') === '1';
+  $('shareSheet').classList.remove('hidden');
+}
+
+function busy(text) {
+  $('importText').textContent = text;
+  $('importing').classList.toggle('hidden', !text);
+}
+
+async function doShare(zip) {
+  $('shareSheet').classList.add('hidden');
+  const list = shareList;
+  localStorage.setItem('shareJpeg', $('shareJpeg').checked ? '1' : '0');
+  if (NATIVE) {
+    busy(list.length > 1 ? `Getting ${itemWord(list.length, list)} ready…` : 'Getting it ready…');
+    try {
+      await Lib.shareItems({ ids: list.map((p) => p.id), zip, jpeg: IOS && $('shareJpeg').checked });
+    } catch (e) {
+      toast(`Couldn't share: ${e?.message || 'something went wrong'}`);
+    } finally {
+      busy('');
+    }
+    return;
+  }
+  // Website: the browser's share sheet with the original files.
+  const files = (await Promise.all(list.map(async (p) => {
+    const b = await db.getBlob(p.id);
+    return b ? new File([b], p.name || 'photo.jpg', { type: b.type || p.type || 'image/jpeg' }) : null;
+  }))).filter(Boolean);
+  if (files.length && navigator.canShare?.({ files })) {
+    try { await navigator.share({ files }); } catch { /* cancelled */ }
+  } else {
+    toast('This browser can’t share photos — use the Swipe Clean app');
+  }
+}
+
+/* ---------- Similar photos & people (index built on the phone) ---------- */
+
+// How far apart two fingerprints may be and still count as "similar".
+const SIMILAR_CUT = IOS ? 0.55 : 0.45;
+let indexState = null;
+let people = [];
+
+async function startIndex() {
+  if (!NATIVE || indexState?.running) return;
+  indexState = { ...(indexState || {}), running: true };
+  renderPeople();
+  try { indexState = await Lib.indexLibrary(); } catch (e) { console.error(e); }
+  indexState = { ...(indexState || {}), running: false };
+  await refreshPeople();
+  if (view?.kind === 'similar') showSimilar({ id: view.queryId }, { refresh: true });
+  if (view?.kind === 'dups') showDuplicates({ refresh: true });
+}
+
+async function showSimilar(p, { refresh = false } = {}) {
+  if (!NATIVE) return;
+  if (!refresh) {
+    closeViewer();
+    if (!$('swiper').classList.contains('hidden')) closeSwiper();
+    busy('Looking for similar photos…');
+  }
+  try {
+    const st = await Lib.indexStatus();
+    indexState = { ...st, running: st.running || indexState?.running };
+    if (!st.running && st.indexed < st.total) startIndex();   // keep improving in the background
+    const { matches } = await Lib.findSimilar({ id: p.id, limit: 150 });
+    const ids = [p.id, ...matches.filter((m) => m.d <= SIMILAR_CUT).map((m) => m.id)];
+    const v = { kind: 'similar', title: 'Similar photos', queryId: p.id, ids, face: null };
+    if (refresh) { if (view?.kind === 'similar' && view.queryId === p.id) { view = v; render(); } }
+    else openView(v);
+  } catch (e) {
+    toast('Couldn’t look for similar photos');
+  } finally {
+    if (!refresh) busy('');
+  }
+}
+
+// Duplicates: how close two fingerprints must be to count as the same picture.
+const DUP_CUT = IOS ? 0.27 : 0.2;
+
+async function showDuplicates({ refresh = false } = {}) {
+  if (!NATIVE) return;
+  if (!refresh) busy('Looking for duplicates…');
+  try {
+    const st = await Lib.indexStatus();
+    indexState = { ...st, running: st.running || indexState?.running };
+    if (!st.running && st.indexed < st.total) startIndex();   // first time: index in the background
+    const { groups } = await Lib.findDuplicates({ maxDistance: DUP_CUT });
+    const byId = new Map(photos.map((p) => [p.id, p]));
+    const live = groups.map((g) => g.ids.filter((id) => byId.get(id) && byId.get(id).status !== 'trash')).filter((g) => g.length > 1);
+    const v = { kind: 'dups', title: 'Duplicates', ids: live.flat(), groups: live, face: null };
+    if (refresh) { if (view?.kind !== 'dups') return; view = v; }
+    else openView(v);
+    // Pre-select every copy except the best one in each group; the user reviews, then deletes.
+    if (live.length) {
+      if (!sel.on) setSelecting(true);
+      sel.ids = new Set(live.flatMap((g) => g.slice(1)));
+    }
+    render();
+  } catch (e) {
+    console.error(e);
+    toast('Couldn’t look for duplicates');
+  } finally {
+    if (!refresh) busy('');
+  }
+}
+
+async function refreshPeople() {
+  if (!IOS || !(access === 'granted' || access === 'limited')) return renderPeople();
+  try {
+    const st = await Lib.indexStatus();
+    indexState = { ...st, running: st.running || indexState?.running };
+    if (st.indexed > 0) people = (await Lib.getPeople({ strictness: parseFloat($('matchSelect').value) })).people || [];
+  } catch (e) { console.error(e); }
+  renderPeople();
+}
+
+function renderPeople() {
+  const sec = $('people');
+  sec.classList.toggle('hidden', !IOS || !photos.length);
+  if (!IOS) return;
+  const body = $('peopleBody');
+  const st = indexState || {};
+  $('matchPill').classList.toggle('hidden', !people.length);
+  if (st.running) {
+    const pct = st.total ? Math.round((st.indexed / st.total) * 100) : 0;
+    body.innerHTML = `<div class="people-card"><span>Looking for faces on your phone… <b id="scanText">${(st.indexed || 0).toLocaleString()} of ${(st.total || 0).toLocaleString()}</b></span>
+      <div class="scan-bar"><i id="scanFill" style="width:${pct}%"></i></div>
+      <span>You can keep using the app. Nothing leaves your phone.</span></div>`;
+    return;
+  }
+  if (!st.indexed) {
+    body.innerHTML = `<div class="people-card"><b>Find your friends in your photos</b>
+      <span>Swipe Clean groups faces so you can share every photo of someone before you clean up. It runs on your phone; nothing is uploaded.</span>
+      <button class="primary small" id="scanBtn">Scan photos</button></div>`;
+    $('scanBtn').onclick = startIndex;
+    return;
+  }
+  if (!people.length) {
+    body.innerHTML = `<div class="people-card"><span>No groups of faces found yet${st.indexed < st.total ? '' : '. Try “Loose match”'}.</span>
+      ${st.indexed < st.total ? '<button class="primary small" id="scanBtn">Scan the rest</button>' : ''}</div>`;
+    $('scanBtn')?.addEventListener('click', startIndex);
+    return;
+  }
+  body.textContent = '';
+  people.forEach((person, i) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'face-chip';
+    const face = Cap.convertFileSrc(person.thumb);
+    b.innerHTML = `<img alt="" src="${face}" /><span>${person.count}</span>`;
+    b.setAttribute('aria-label', `Person ${i + 1}, ${person.count} photos`);
+    b.onclick = () => {
+      const byId = new Map(photos.map((p) => [p.id, p]));
+      const ids = person.ids.filter((id) => byId.has(id)).sort((a, c) => byId.get(c).taken - byId.get(a).taken);
+      openView({ kind: 'person', title: `Person ${i + 1}`, face, ids });
+    };
+    body.append(b);
+  });
+}
+
+function setupFindAndShare() {
+  $('viewClose').onclick = closeView;
+  $('dupBtn').onclick = () => showDuplicates();
+  $('viewerShare').onclick = () => { if (pv.p) openShare([pv.p]); };
+  $('viewerSimilar').onclick = () => { if (pv.p) showSimilar(pv.p); };
+  $('viewerSimilar').classList.toggle('hidden', !NATIVE);
+  $('shareMedia').onclick = () => doShare(false);
+  $('shareZip').onclick = () => doShare(true);
+  $('shareClose').onclick = () => $('shareSheet').classList.add('hidden');
+  $('shareSheet').addEventListener('click', (e) => { if (e.target.id === 'shareSheet') $('shareSheet').classList.add('hidden'); });
+  $('matchSelect').onchange = refreshPeople;
+  if (NATIVE) {
+    Lib.addListener('indexProgress', ({ done, total }) => {
+      indexState = { ...(indexState || {}), indexed: done, total, running: done < total };
+      const fill = $('scanFill'), text = $('scanText');
+      if (fill && text) {
+        fill.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
+        text.textContent = `${done.toLocaleString()} of ${total.toLocaleString()}`;
+      } else if (IOS) renderPeople();
+    });
+  }
 }
 
 /* ---------- Status changes ---------- */
@@ -1540,6 +1783,9 @@ function pvActions(p) {
       if (await removeForever([p.id])) deletedToast(`Deleted ${itemWord(1, [p])}`);
       else toast('Not deleted');
     });
+  } else if (p.status === 'pending') {
+    add('✕ Delete', 'decide trash', async () => { await setStatus(p, 'trash'); bumpToday(1); });
+    add('✓ Keep', 'decide keep', async () => { await setStatus(p, 'kept'); bumpToday(1); });
   } else {
     add('Move to Deleted', 'trash', () => setStatus(p, 'trash'));
     add('Back to To review', '', () => setStatus(p, 'pending'));
@@ -1845,7 +2091,8 @@ function bind() {
     if (!p) return;
     if (sel.suppressClick) { sel.suppressClick = false; return; }
     if (sel.on) { toggleSelected(p.id); return; }
-    if (p.status === 'pending') openSwiper(p.id);
+    if (view) openViewer(p);
+    else if (p.status === 'pending') openSwiper(p.id);
     else openViewer(p);
   });
 
@@ -1864,6 +2111,7 @@ function bind() {
 
   setupViewerGestures();
   setupSelection();
+  setupFindAndShare();
 
   $('restoreAllBtn').onclick = async () => {
     const list = byStatus('trash');
@@ -1975,7 +2223,7 @@ async function init() {
       ? 'After this, they\'re deleted from your iPhone (iOS keeps them in Recently Deleted for 30 more days). 0 = delete right away.'
       : 'After this, they\'re deleted from your phone. 0 = delete right away.';
     try { ({ status: access } = await Lib.requestAccess()); } catch (e) { console.error('PhotoLibrary.requestAccess failed:', e?.code, e?.message || e); access = 'denied'; }
-    if (access === 'granted' || access === 'limited') { await syncNativeLibrary(); refreshStorage(); }
+    if (access === 'granted' || access === 'limited') { await syncNativeLibrary(); refreshStorage(); refreshPeople(); }
   } else {
     photos = await db.getAllMeta();
   }
@@ -2008,6 +2256,7 @@ async function init() {
 window.swipeCleanBack = () => {
   if (!$('viewer').classList.contains('hidden')) { closeViewer(); return true; }
   if (sel.on) { setSelecting(false); return true; }
+  if (view) { closeView(); return true; }
   if (!$('settings').classList.contains('hidden')) { $('settings').classList.add('hidden'); return true; }
   if (!$('swiper').classList.contains('hidden')) { closeSwiper(); return true; }
   if (tab !== 'pending') { setTab('pending'); return true; }
