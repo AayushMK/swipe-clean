@@ -204,12 +204,14 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let a = asset(id) else { return call.reject("Photo not found") }
         let opts = PHImageRequestOptions()
         opts.deliveryMode = .highQualityFormat
-        opts.resizeMode = .fast
+        opts.resizeMode = isThumb ? .fast : .exact   // full views: properly resampled pixels
         opts.isNetworkAccessAllowed = true   // items stored in iCloud
         opts.isSynchronous = false
         let target = CGSize(width: size, height: size)
         imageManager.requestImage(for: a, targetSize: target, contentMode: isThumb ? .aspectFill : .aspectFit, options: opts) { image, _ in
-            guard let image = image, let data = image.jpegData(compressionQuality: isThumb ? 0.75 : 0.88) else {
+            // Detail view (4096 px) gets near-lossless quality.
+            let quality: CGFloat = isThumb ? 0.75 : (size > 2048 ? 0.95 : 0.9)
+            guard let image = image, let data = image.jpegData(compressionQuality: quality) else {
                 return call.reject("Could not load photo")
             }
             do {

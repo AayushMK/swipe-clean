@@ -188,7 +188,8 @@ public class PhotoLibraryPlugin extends Plugin {
                     Bitmap bmp = load(id, size);
                     if (bmp == null) { call.reject("Could not load photo"); return; }
                     try (FileOutputStream out = new FileOutputStream(file)) {
-                        bmp.compress(Bitmap.CompressFormat.JPEG, thumb ? 75 : 88, out);
+                        // Detail view (4096 px) gets near-lossless quality.
+                        bmp.compress(Bitmap.CompressFormat.JPEG, thumb ? 75 : (size > 2048 ? 95 : 90), out);
                     }
                 }
                 JSObject ret = new JSObject();
