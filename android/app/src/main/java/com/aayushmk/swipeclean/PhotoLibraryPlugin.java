@@ -132,6 +132,8 @@ public class PhotoLibraryPlugin extends Plugin {
         cols.add(MediaStore.MediaColumns.WIDTH);
         cols.add(MediaStore.MediaColumns.HEIGHT);
         cols.add(MediaStore.MediaColumns.SIZE);
+        cols.add(MediaStore.MediaColumns.DISPLAY_NAME);
+        cols.add("bucket_display_name");   // folder, e.g. "Screenshots"
         if (video) cols.add(MediaStore.Video.VideoColumns.DURATION);
         try (Cursor c = getContext().getContentResolver().query(collection, cols.toArray(new String[0]), null, null, null)) {
             if (c == null) return;
@@ -145,7 +147,11 @@ public class PhotoLibraryPlugin extends Plugin {
                 o.put("height", c.getInt(4));
                 o.put("size", c.getLong(5));
                 o.put("type", video ? "video" : "image");
-                if (video) o.put("duration", c.getLong(6) / 1000.0);
+                String where = (c.getString(6) + " " + c.getString(7)).toLowerCase();
+                if (where.contains("screenshot") || where.contains("screen record") || where.contains("screenrecord")) {
+                    o.put("screenshot", true);
+                }
+                if (video) o.put("duration", c.getLong(8) / 1000.0);
                 items.put(o);
             }
         }

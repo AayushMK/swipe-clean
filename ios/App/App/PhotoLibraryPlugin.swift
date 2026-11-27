@@ -98,6 +98,7 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
                     "type": asset.mediaType == .video ? "video" : "image",
                 ]
                 if asset.mediaType == .video { item["duration"] = asset.duration }
+                if asset.mediaSubtypes.contains(.photoScreenshot) { item["screenshot"] = true }
                 items.append(item)
             }
             call.resolve(["photos": items])
@@ -228,12 +229,14 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func getStorageInfo(_ call: CAPPluginCall) {
         DispatchQueue.global(qos: .utility).async {
             var photoBytes: Int64 = 0, videoBytes: Int64 = 0, photoCount = 0, videoCount = 0
+            var sizes: [String: Int64] = [:]   // per item, for "Largest first"
             let opts = PHFetchOptions()
             opts.predicate = NSPredicate(format: "mediaType == %d || mediaType == %d",
                                          PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
             PHAsset.fetchAssets(with: opts).enumerateObjects { a, _, _ in
                 autoreleasepool {
                     let b = Self.bytes(of: a)
+                    sizes[a.localIdentifier] = b
                     if a.mediaType == .video { videoBytes += b; videoCount += 1 } else { photoBytes += b; photoCount += 1 }
                 }
             }
@@ -247,6 +250,7 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
                 "photoBytes": photoBytes, "videoBytes": videoBytes,
                 "photoCount": photoCount, "videoCount": videoCount,
                 "totalBytes": total, "freeBytes": free,
+                "sizes": sizes,
             ])
         }
     }
