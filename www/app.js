@@ -1056,6 +1056,13 @@ function setupInstallHint() {
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   if (standalone || localStorage.getItem('installDismissed')) return;
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (/android/i.test(navigator.userAgent)) {
+    // The Android app reads the whole library and really deletes photos.
+    $('installText').innerHTML = '<a href="SwipeClean.apk" download>Get the Android app</a> — it deletes photos from your phone';
+    $('installBtn').classList.add('hidden');
+    $('installHint').classList.remove('hidden');
+    return;
+  }
   if (ios) {
     $('installText').innerHTML = 'Install: tap <b>Share</b> → <b>Add to Home Screen</b>';
     $('installBtn').classList.add('hidden');

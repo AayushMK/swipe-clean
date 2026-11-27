@@ -41,8 +41,8 @@ With a free Apple ID the app stops opening after 7 days. Re-run from Xcode to re
 To share with other iPhone users you need the paid Apple Developer Program ($99/year) and TestFlight or the App Store.
 
 ## Install on Android
-Ready-made file: `SwipeClean.apk` (build it with the steps below if it's missing).
-1. Send the `.apk` to the phone (AirDrop to a Mac doesn't work for Android: use Google Drive, email, WhatsApp, or a USB cable).
+**Download:** https://aayushmk.github.io/swipe-clean/SwipeClean.apk (opening the website on an Android phone also shows a download link).
+1. Open that link on the phone, or send the `.apk` to it (Google Drive, email, WhatsApp, USB cable).
 2. Open it on the phone. Android asks to allow installing from that app (Files, Chrome, Drive…) the first time: tap **Settings → Allow from this source**, go back, tap **Install**.
 3. Open Swipe Clean and allow access to photos and videos.
 
@@ -59,9 +59,9 @@ npm run sync                      # copy www/ into the iOS and Android projects
 ```
 Then rebuild from Xcode / Android Studio.
 
-Website: bump `VERSION` in `www/sw.js`, commit, then publish `www/`:
+Website: bump `VERSION` in `www/sw.js`, commit, then publish `www/` and `SwipeClean.apk` (copy a fresh APK to the project root first):
 ```bash
-git push origin `git subtree split --prefix www main`:gh-pages --force
+npm run deploy
 ```
 
 ## Run the website locally
