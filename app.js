@@ -1044,7 +1044,15 @@ function setupViewerGestures() {
     if (mode === 'pan') {
       pv.tx = start.tx + dx; pv.ty = start.ty + dy;
       pvApply(false);
-    } else if (mode === 'maybe-close' && moved) {
+    } else if (mode === 'maybe-close' && moved && !start.axis) {
+      start.axis = Math.abs(dx) > Math.abs(dy) ? 'nav' : 'close';
+    }
+    if (mode === 'maybe-close' && start.axis === 'nav') {
+      // Sideways: the photo follows the finger; past the first/last photo it resists.
+      const atEnd = (dx < 0 && pv.i >= pv.list.length - 1) || (dx > 0 && pv.i <= 0);
+      stage.style.transition = 'none';
+      stage.style.transform = `translate3d(${atEnd ? dx * 0.3 : dx}px,0,0)`;
+    } else if (mode === 'maybe-close' && start.axis === 'close') {
       // Swipe down to close, like Photos: the picture follows the finger and the black fades.
       const d = Math.max(0, dy);
       pv.tx = start.tx + dx * 0.4; pv.ty = start.ty + d;
@@ -1065,6 +1073,21 @@ function setupViewerGestures() {
     if (was === 'pinch') {
       if (pv.s < 1) { pv.s = 1; }
       pvApply(true);
+      return;
+    }
+    if (was === 'maybe-close' && moved && start.axis === 'nav') {
+      const dx = (e.changedTouches[0]?.clientX ?? start.p.x) - start.p.x;
+      const dt = performance.now() - start.t;
+      const dir = dx < 0 ? 1 : -1;
+      const far = Math.abs(dx) > stage.clientWidth * 0.22 || (Math.abs(dx) > 40 && Math.abs(dx) / dt > 0.45);
+      if (far && pv.list[pv.i + dir]) {
+        stage.style.transition = 'transform .18s ease-in';
+        stage.style.transform = `translate3d(${-dir * stage.clientWidth}px,0,0)`;
+        setTimeout(() => pvGo(dir), 170);
+      } else {
+        stage.style.transition = 'transform .22s cubic-bezier(.2,.8,.2,1)';
+        stage.style.transform = '';
+      }
       return;
     }
     if (was === 'maybe-close' && moved) {
@@ -1116,7 +1139,10 @@ function setupViewerGestures() {
     pvFit(img.naturalWidth || pv.p?.width, img.naturalHeight || pv.p?.height);
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !viewer.classList.contains('hidden')) closeViewer();
+    if (viewer.classList.contains('hidden')) return;
+    if (e.key === 'Escape') closeViewer();
+    else if (e.key === 'ArrowRight') pvGo(1);
+    else if (e.key === 'ArrowLeft') pvGo(-1);
   });
 }
 
@@ -1148,27 +1174,60 @@ async function loadDetail() {
   await pvShow(u, token);
 }
 
+// The viewer moves through a list: what's left to review (from the swipe view) or the
+// photos in the current tab (Kept / Deleted). Swipe left for the next one, right for the previous.
 async function openViewer(p, { fromSwipe = false } = {}) {
-  const viewer = $('viewer'), img = $('viewerImg'), vid = $('viewerVideo');
-  pv.p = p; pv.fromSwipe = fromSwipe; pv.token = Symbol('view'); pv.w = 0;
-  detailRequested = false;
-  const token = pv.token;
+  pv.fromSwipe = fromSwipe;
+  pv.list = fromSwipe ? swipe.queue.slice(swipe.index) : [...gridList];
+  pv.i = Math.max(0, pv.list.findIndex((x) => x.id === p.id));
+  pv.cache = new Map();
+  const viewer = $('viewer');
   viewer.classList.remove('hidden', 'bare');
   viewer.style.backgroundColor = '';
+  pvLoad(0);
+}
+
+// URL for a photo's screen-size picture, shared by the viewer and its neighbours.
+function pvUrlFor(p) {
+  if (pv.fromSwipe) return fullUrl(p);
+  if (!pv.cache.has(p.id)) pv.cache.set(p.id, loadFull(p));
+  return pv.cache.get(p.id);
+}
+
+// Show pv.list[pv.i]. dir = +1 / -1 slides it in from the right / left.
+async function pvLoad(dir) {
+  const img = $('viewerImg'), vid = $('viewerVideo'), stage = $('pvStage');
+  const p = pv.list[pv.i];
+  if (!p) { closeViewer(); return; }
+  pv.p = p; pv.token = Symbol('view'); pv.w = 0; pv.s = 1;
+  detailRequested = false;
+  const token = pv.token;
+  vid.pause(); vid.removeAttribute('src');
   img.removeAttribute('src'); img.style.transform = '';
   img.classList.remove('hidden'); vid.classList.add('hidden');
 
   const extra = p.status === 'trash'
     ? ` · deleted ${fmtDate(p.trashedAt)} · ${plural(daysLeft(p), 'day')} left`
     : p.status === 'kept' ? ` · kept ${fmtDate(p.reviewedAt)}` : '';
-  $('viewerMeta').textContent = `${p.name ? p.name + ' · ' : ''}${infoText(p)}${extra}`;
-  pvActions(p, fromSwipe);
+  const count = pv.list.length > 1 ? `${pv.i + 1} of ${pv.list.length}\n` : '';
+  $('viewerMeta').textContent = `${count}${p.name ? p.name + ' · ' : ''}${infoText(p)}${extra}`;
+  pvActions(p);
+
+  // Slide the new photo in from the side it came from.
+  stage.style.transition = 'none';
+  stage.style.transform = dir ? `translate3d(${dir * stage.clientWidth}px,0,0)` : '';
+  if (dir) requestAnimationFrame(() => requestAnimationFrame(() => {
+    stage.style.transition = 'transform .24s cubic-bezier(.2,.8,.2,1)';
+    stage.style.transform = '';
+  }));
+
+  // Get the neighbours ready so the next swipe is instant.
+  [pv.list[pv.i + 1], pv.list[pv.i - 1]].forEach((n) => { if (n && !isVideo(n)) pvUrlFor(n); });
 
   if (isVideo(p)) {
-    const u = fromSwipe ? await fullUrl(p) : await loadFull(p);
+    const u = await pvUrlFor(p);
     if (token !== pv.token) return;
     if (u) {
-      if (u.startsWith('blob:') && !fromSwipe) pv.urls.push(u);
       vid.poster = thumbUrlNow(p) || '';
       vid.src = u;
       vid.classList.remove('hidden'); img.classList.add('hidden');
@@ -1181,24 +1240,57 @@ async function openViewer(p, { fromSwipe = false } = {}) {
   // (iPhone thumbnails are square crops, so the app's first step there is the screen-size picture.)
   const thumb = NATIVE ? null : thumbUrlNow(p);
   if (thumb) await pvShow(thumb, token);
-  const full = fromSwipe ? await fullUrl(p) : await loadFull(p);
-  if (full?.startsWith('blob:') && !fromSwipe) pv.urls.push(full);
-  await pvShow(full, token);
-  loadDetail();
+  await pvShow(await pvUrlFor(p), token);
+  if (token === pv.token) loadDetail();
 }
 
-function pvActions(p, fromSwipe) {
+// Move to the next (+1) or previous (-1) photo. Returns false at either end.
+function pvGo(dir) {
+  const j = pv.i + dir;
+  if (j < 0 || j >= pv.list.length) return false;
+  pv.i = j;
+  pvLoad(dir);
+  return true;
+}
+
+// After acting on the photo on screen: drop it from the list and show the next one.
+function pvAfterAction() {
+  pv.list.splice(pv.i, 1);
+  if (!pv.list.length) { closeViewer(); return; }
+  if (pv.i >= pv.list.length) pv.i = pv.list.length - 1;
+  pvLoad(1);
+}
+
+// The swipe deck always shows the photo the viewer was on.
+function pvSyncDeck() {
+  if (!pv.fromSwipe || !pv.p) return;
+  const at = swipe.queue.indexOf(pv.p, swipe.index);
+  if (at > swipe.index) {
+    swipe.queue.splice(at, 1);
+    swipe.queue.splice(swipe.index, 0, pv.p);
+    renderDeck();
+  }
+}
+
+function pvActions(p) {
   const actions = $('viewerActions');
   actions.textContent = '';
   const add = (label, cls, fn) => {
     const b = document.createElement('button');
     b.type = 'button'; b.textContent = label; b.className = cls;
-    b.onclick = async () => { closeViewer(); await fn(); if (!fromSwipe) render(); };
+    b.onclick = async () => {
+      if (b.disabled) return;
+      b.disabled = true;
+      await fn();
+      if (!pv.fromSwipe) render();
+      pvAfterAction();
+    };
     actions.append(b);
   };
-  if (fromSwipe) {
-    add('✕ Delete', 'decide trash', () => decide('trash'));
-    add('✓ Keep', 'decide keep', () => decide('kept'));
+  if (pv.fromSwipe) {
+    const decideHere = (status) => async () => { pvSyncDeck(); await decide(status); };
+    add('✕ Delete', 'decide trash', decideHere('trash'));
+    add('✓ Keep', 'decide keep', decideHere('kept'));
   } else if (p.status === 'trash') {
     add('Restore', 'keep', () => setStatus(p, 'kept'));
     add('Back to To review', '', () => setStatus(p, 'pending'));
@@ -1215,9 +1307,13 @@ function pvActions(p, fromSwipe) {
 function closeViewer() {
   const viewer = $('viewer');
   if (viewer.classList.contains('hidden')) return;
+  pvSyncDeck();   // closing from the swipe view lands on the photo you were looking at
   viewer.classList.add('hidden');
   viewer.style.backgroundColor = '';
+  $('pvStage').style.transform = '';
   pv.token = null; pv.p = null;
+  if (!pv.fromSwipe) pv.cache?.forEach((u) => Promise.resolve(u).then((x) => { if (x?.startsWith('blob:')) URL.revokeObjectURL(x); }));
+  pv.cache = new Map();
   const vid = $('viewerVideo');
   vid.pause(); vid.removeAttribute('src'); vid.load();
   $('viewerImg').removeAttribute('src');
