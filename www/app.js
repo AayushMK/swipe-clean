@@ -897,6 +897,7 @@ async function decide(status) {
   if (!swipe.goalCelebrated && todayCount() >= settings.dailyGoal) {
     swipe.goalCelebrated = true;
     toast(`🎉 Daily goal of ${settings.dailyGoal} done! Keep going if you like.`);
+    refreshNativeReminders();   // no reminder later today
   }
   await new Promise((r) => setTimeout(r, 220));
   renderDeck();
@@ -969,26 +970,60 @@ function closeViewer() {
 /* ---------- Reminders ---------- */
 
 // Native app: a real daily local notification.
-async function scheduleNativeReminder() {
-  const perm = await Notify.requestPermissions();
+// One notification per day for the next REMINDER_DAYS days. Re-planned every time
+// the app opens, so today's is skipped once the goal is done, and the text
+// says how many are waiting. (A plain repeating reminder can't do either.)
+const REMINDER_DAYS = 21;
+const reminderIds = () => [REMINDER_ID, ...Array.from({ length: REMINDER_DAYS }, (_, i) => REMINDER_ID + 1 + i)];
+
+async function cancelNativeReminders() {
+  await Notify.cancel({ notifications: reminderIds().map((id) => ({ id })) }).catch(() => {});
+}
+
+function reminderText(isToday) {
+  const waiting = byStatus('pending').length;
+  const left = Math.max(0, settings.dailyGoal - (isToday ? todayCount() : 0));
+  if (!waiting) return 'Time to clean up — new photos are waiting to be reviewed.';
+  if (waiting <= left) return `${waiting.toLocaleString()} ${waiting === 1 ? 'photo' : 'photos'} left to review — finish them off today.`;
+  return `Swipe through ${left || settings.dailyGoal} photos today · ${waiting.toLocaleString()} waiting to review.`;
+}
+
+// ask = may show the permission prompt. Returns true if reminders are scheduled.
+async function scheduleNativeReminder({ ask = true } = {}) {
+  let perm = await Notify.checkPermissions().catch(() => ({ display: 'denied' }));
+  if (perm.display !== 'granted' && ask) perm = await Notify.requestPermissions();
   if (perm.display !== 'granted') {
-    toast('Notifications are off — allow them in Settings');
+    if (ask) toast('Notifications are off — allow them in Settings');
     return false;
   }
+  await cancelNativeReminders();
   const [hour, minute] = settings.reminderTime.split(':').map(Number);
-  await Notify.cancel({ notifications: [{ id: REMINDER_ID }] }).catch(() => {});
-  await Notify.schedule({
-    notifications: [{
-      id: REMINDER_ID,
+  const now = new Date();
+  const goalDone = todayCount() >= settings.dailyGoal;
+  const list = [];
+  for (let i = 0; i < REMINDER_DAYS; i++) {
+    const at = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i, hour, minute, 0, 0);
+    if (at <= now || (i === 0 && goalDone)) continue;
+    list.push({
+      id: REMINDER_ID + 1 + i,
       title: 'Swipe Clean 🧹',
-      body: `Time for today's cleanup — review ${settings.dailyGoal} photos.`,
-      schedule: { on: { hour, minute }, allowWhileIdle: true },
+      body: reminderText(i === 0),
+      schedule: { at, allowWhileIdle: true },
       // A daily nudge doesn't need to-the-second timing; without this, Android
       // asks for the extra "Alarms & reminders" permission.
       isExactNotification: false,
-    }],
-  });
+    });
+  }
+  if (list.length) await Notify.schedule({ notifications: list });
   return true;
+}
+
+// Keep the planned reminders fresh (quietly — never shows a prompt).
+async function refreshNativeReminders() {
+  if (!NATIVE || !settings.reminderOn) return;
+  settings.reminderOn = await scheduleNativeReminder({ ask: false }).catch(() => settings.reminderOn);
+  saveSettings();
+  updateReminderButton();
 }
 
 // Website: a repeating calendar event (works without notifications support).
@@ -1087,7 +1122,7 @@ async function saveSettingsForm(e) {
   settings.reminderTime = $('setTime').value || DEFAULTS.reminderTime;
   saveSettings();
   if (NATIVE && settings.reminderOn && (oldTime !== settings.reminderTime || oldGoal !== settings.dailyGoal)) {
-    await scheduleNativeReminder().catch(() => {});
+    await scheduleNativeReminder({ ask: false }).catch(() => {});
   }
   $('settings').classList.add('hidden');
   render();
@@ -1222,6 +1257,10 @@ function bind() {
   $('settings').addEventListener('click', (e) => { if (e.target.id === 'settings') $('settings').classList.add('hidden'); });
   $('settingsForm').onsubmit = saveSettingsForm;
   $('reminderBtn').onclick = onReminderButton;
+  // iPhone: tapping the styled time field didn't open the time wheel. Open it ourselves.
+  $('setTime').addEventListener('click', (e) => {
+    try { e.currentTarget.showPicker?.(); } catch { /* not supported: focus is enough */ }
+  });
   $('notifyBtn').onclick = async () => {
     const r = await Notification.requestPermission();
     $('notifyBtn').classList.add('hidden');
@@ -1234,7 +1273,7 @@ function bind() {
     if (!confirm(msg)) return;
     await db.deletePhotos((await db.getAllMeta()).map((r) => r.id));
     localStorage.clear();
-    if (NATIVE) await Notify.cancel({ notifications: [{ id: REMINDER_ID }] }).catch(() => {});
+    if (NATIVE) await cancelNativeReminders();
     location.reload();
   };
 
@@ -1257,6 +1296,7 @@ function bind() {
     }
     if (await purgeExpired()) render(); else renderCounts();
     maybeNotify();
+    refreshNativeReminders();
   });
 }
 
@@ -1296,6 +1336,18 @@ async function init() {
     toast(`${settings.dailyGoal - todayCount()} left for today's goal`);
   }
   maybeNotify();
+  if (NATIVE) {
+    // Daily reminder is on by default: ask for notifications once, on first launch.
+    if (!settings.reminderAsked) {
+      settings.reminderAsked = true;
+      settings.reminderOn = await scheduleNativeReminder({ ask: true }).catch(() => false);
+      saveSettings();
+      updateReminderButton();
+      if (settings.reminderOn) toast(`Daily reminder on at ${settings.reminderTime} · change it in ⚙︎`);
+    } else {
+      refreshNativeReminders();
+    }
+  }
   if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
