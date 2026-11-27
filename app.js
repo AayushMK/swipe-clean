@@ -63,7 +63,7 @@ const byStatus = (s) => photos.filter((p) => p.status === s);
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const isVideo = (p) => p.kind === 'video';
 const itemWord = (n, list) => {
-  const v = list ? list.every(isVideo) : false;
+  const v = list?.length ? list.every(isVideo) : false;
   return plural(n, v ? 'video' : (list && list.some(isVideo) ? 'item' : 'photo'));
 };
 function fmtDuration(sec) {
@@ -712,7 +712,11 @@ function updateMuteBadge(card) {
 // Tap on a video card: play if paused, otherwise toggle sound.
 function tapCard(card) {
   const v = card.querySelector('video');
-  if (!v) return;
+  if (!v) {   // photo: open it full size
+    const p = swipe.queue[swipe.index];
+    if (p && p.id === card.dataset.id) openViewer(p, { fromSwipe: true });
+    return;
+  }
   if (v.paused) { v.play().catch(() => {}); updateMuteBadge(card); return; }
   swipe.muted = !swipe.muted;
   v.muted = swipe.muted;
@@ -930,53 +934,295 @@ async function undo() {
 
 /* ---------- Viewer for kept / deleted photos ---------- */
 
-let viewerUrl = null;
-async function openViewer(p) {
-  const img = $('viewerImg'), vid = $('viewerVideo');
-  img.src = thumbUrlNow(p) || '';
-  img.classList.remove('hidden');
-  vid.classList.add('hidden');
-  $('viewer').classList.remove('hidden');
-  viewerUrl = await loadFull(p);
-  if (viewerUrl && isVideo(p)) {
-    vid.poster = thumbUrlNow(p) || '';
-    vid.src = viewerUrl;
-    vid.classList.remove('hidden');
-    img.classList.add('hidden');
-  } else if (viewerUrl) img.src = viewerUrl;
+/* ---------- Full-size viewer ----------
+   Works like the Photos app: the picture fills a black screen, pinch or double-tap to
+   zoom (up to the photo's real pixels), drag to look around, swipe down to close, tap
+   to hide the controls. Pictures sharpen in steps: thumbnail → screen size → 4096 px. */
+
+const DETAIL_PX = 4096;
+const pv = {
+  p: null, fromSwipe: false, urls: [],
+  s: 1, tx: 0, ty: 0, w: 0, h: 0, max: 3,   // scale, position of the image's top-left, fitted size
+};
+
+async function detailUrl(p) {
+  if (NATIVE) {
+    if (isVideo(p)) return null;
+    try { return await nativeImage(p.id, DETAIL_PX); } catch { return null; }
+  }
+  const blob = await db.getBlob(p.id);   // website: the original file itself
+  if (!blob) return null;
+  const u = URL.createObjectURL(blob);
+  pv.urls.push(u);
+  return u;
+}
+
+function pvStageSize() { const r = $('pvStage').getBoundingClientRect(); return { W: r.width, H: r.height }; }
+
+// Size the image to fit the screen; zoom happens on top of this with a transform.
+function pvFit(natW, natH) {
+  const img = $('viewerImg');
+  const { W, H } = pvStageSize();
+  if (!natW || !natH) return;
+  const k = Math.min(W / natW, H / natH);
+  pv.w = natW * k; pv.h = natH * k;
+  img.style.width = pv.w + 'px'; img.style.height = pv.h + 'px';
+  pv.s = 1; pv.tx = (W - pv.w) / 2; pv.ty = (H - pv.h) / 2;
+  pvApply(false);
+}
+
+function pvSetMax(natW) {
+  // Allow zooming until one photo pixel is bigger than one screen pixel, and at least 3x.
+  pv.max = Math.max(3, (natW / pv.w) / (window.devicePixelRatio || 1) * 2);
+}
+
+function pvClamp() {
+  const { W, H } = pvStageSize();
+  const dw = pv.w * pv.s, dh = pv.h * pv.s;
+  pv.tx = dw <= W ? (W - dw) / 2 : Math.min(0, Math.max(W - dw, pv.tx));
+  pv.ty = dh <= H ? (H - dh) / 2 : Math.min(0, Math.max(H - dh, pv.ty));
+}
+
+function pvApply(animate, clamp = true) {
+  const img = $('viewerImg');
+  if (clamp) pvClamp();
+  img.classList.toggle('settle', !!animate);
+  img.style.transform = `translate3d(${pv.tx}px, ${pv.ty}px, 0) scale(${pv.s})`;
+}
+
+// Zoom to scale s keeping the screen point (x, y) still.
+function pvZoomAt(s, x, y, animate) {
+  s = Math.max(1, Math.min(pv.max, s));
+  pv.tx = x - (x - pv.tx) * (s / pv.s);
+  pv.ty = y - (y - pv.ty) * (s / pv.s);
+  pv.s = s;
+  pvApply(animate);
+}
+
+function pvToggleChrome() { $('viewer').classList.toggle('bare'); }
+
+function setupViewerGestures() {
+  const stage = $('pvStage'), viewer = $('viewer');
+  let mode = null, start = null, lastTap = 0, lastTapAt = null, tapTimer = null, moved = false;
+  const pt = (t) => ({ x: t.clientX, y: t.clientY });
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+  stage.addEventListener('touchstart', (e) => {
+    if (!$('viewerVideo').classList.contains('hidden')) return;   // video: let its controls work
+    e.preventDefault();
+    const ts = [...e.touches].map(pt);
+    moved = false;
+    if (ts.length >= 2) {
+      mode = 'pinch';
+      start = { d: dist(ts[0], ts[1]), m: mid(ts[0], ts[1]), s: pv.s, tx: pv.tx, ty: pv.ty };
+    } else {
+      mode = pv.s > 1.01 ? 'pan' : 'maybe-close';
+      start = { p: ts[0], tx: pv.tx, ty: pv.ty, t: performance.now() };
+    }
+  }, { passive: false });
+
+  stage.addEventListener('touchmove', (e) => {
+    if (!mode) return;
+    e.preventDefault();
+    const ts = [...e.touches].map(pt);
+    if (mode === 'pinch' && ts.length >= 2) {
+      moved = true;
+      const m = mid(ts[0], ts[1]);
+      const s = Math.max(0.6, Math.min(pv.max * 1.15, start.s * dist(ts[0], ts[1]) / start.d));
+      // keep the point that was under the fingers under the fingers
+      pv.tx = m.x - (start.m.x - start.tx) * (s / start.s);
+      pv.ty = m.y - (start.m.y - start.ty) * (s / start.s);
+      pv.s = s;
+      pvApply(false, false);
+      if (s > 1.05) loadDetail();
+      return;
+    }
+    if (!ts.length) return;
+    const dx = ts[0].x - start.p.x, dy = ts[0].y - start.p.y;
+    if (Math.hypot(dx, dy) > 8) moved = true;
+    if (mode === 'pan') {
+      pv.tx = start.tx + dx; pv.ty = start.ty + dy;
+      pvApply(false);
+    } else if (mode === 'maybe-close' && moved) {
+      // Swipe down to close, like Photos: the picture follows the finger and the black fades.
+      const d = Math.max(0, dy);
+      pv.tx = start.tx + dx * 0.4; pv.ty = start.ty + d;
+      pvApply(false, false);
+      viewer.style.backgroundColor = `rgba(0,0,0,${Math.max(0.2, 1 - d / 400)})`;
+      viewer.classList.add('bare');
+    }
+  }, { passive: false });
+
+  stage.addEventListener('touchend', (e) => {
+    if (!mode) return;
+    if (e.touches.length) {   // one finger lifted mid-pinch: carry on panning with the other
+      mode = pv.s > 1.01 ? 'pan' : 'maybe-close';
+      start = { p: pt(e.touches[0]), tx: pv.tx, ty: pv.ty, t: performance.now() };
+      return;
+    }
+    const was = mode; mode = null;
+    if (was === 'pinch') {
+      if (pv.s < 1) { pv.s = 1; }
+      pvApply(true);
+      return;
+    }
+    if (was === 'maybe-close' && moved) {
+      const dy = pv.ty - start.ty;
+      viewer.style.backgroundColor = '';
+      if (dy > 110) { closeViewer(); return; }
+      viewer.classList.remove('bare');
+      pv.tx = start.tx; pv.ty = start.ty; pvApply(true);
+      return;
+    }
+    if (moved) { pvApply(true); return; }
+    // A tap: two quick taps zoom, one tap shows/hides the controls.
+    const now = performance.now(), at = start.p;
+    if (now - lastTap < 300 && lastTapAt && dist(at, lastTapAt) < 40) {
+      clearTimeout(tapTimer); lastTap = 0;
+      if (pv.s > 1.01) { pv.s = 1; pvApply(true); }
+      else { loadDetail(); pvZoomAt(Math.min(pv.max, 2.5), at.x, at.y, true); }
+      return;
+    }
+    lastTap = now; lastTapAt = at;
+    tapTimer = setTimeout(pvToggleChrome, 300);
+  });
+
+  // Computer: scroll wheel / trackpad pinch zooms at the pointer, double-click toggles, drag pans.
+  stage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    loadDetail();
+    pvZoomAt(pv.s * Math.exp(-e.deltaY / 300), e.clientX, e.clientY, false);
+  }, { passive: false });
+  stage.addEventListener('dblclick', (e) => {
+    if (pv.s > 1.01) { pv.s = 1; pvApply(true); } else { loadDetail(); pvZoomAt(2.5, e.clientX, e.clientY, true); }
+  });
+  let drag = null;
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'mouse' || pv.s <= 1.01) return;
+    drag = { x: e.clientX, y: e.clientY, tx: pv.tx, ty: pv.ty };
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    pv.tx = drag.tx + e.clientX - drag.x; pv.ty = drag.ty + e.clientY - drag.y; pvApply(false);
+  });
+  stage.addEventListener('pointerup', () => { drag = null; });
+
+  $('viewerClose').onclick = closeViewer;
+  window.addEventListener('resize', () => {
+    if (viewer.classList.contains('hidden')) return;
+    const img = $('viewerImg');
+    pvFit(img.naturalWidth || pv.p?.width, img.naturalHeight || pv.p?.height);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !viewer.classList.contains('hidden')) closeViewer();
+  });
+}
+
+// Swap in a sharper picture without moving anything on screen.
+function pvShow(url, token) {
+  return new Promise((resolve) => {
+    if (!url) return resolve(false);
+    const probe = new Image();
+    probe.onload = () => {
+      if (token !== pv.token) return resolve(false);
+      const img = $('viewerImg');
+      const first = !pv.w;
+      img.src = url;
+      if (first) pvFit(probe.naturalWidth, probe.naturalHeight);
+      pvSetMax(probe.naturalWidth);
+      resolve(true);
+    };
+    probe.onerror = () => resolve(false);
+    probe.src = url;
+  });
+}
+
+let detailRequested = false;
+async function loadDetail() {
+  if (detailRequested || !pv.p || isVideo(pv.p)) return;
+  detailRequested = true;
+  const token = pv.token;
+  const u = await detailUrl(pv.p);
+  await pvShow(u, token);
+}
+
+async function openViewer(p, { fromSwipe = false } = {}) {
+  const viewer = $('viewer'), img = $('viewerImg'), vid = $('viewerVideo');
+  pv.p = p; pv.fromSwipe = fromSwipe; pv.token = Symbol('view'); pv.w = 0;
+  detailRequested = false;
+  const token = pv.token;
+  viewer.classList.remove('hidden', 'bare');
+  viewer.style.backgroundColor = '';
+  img.removeAttribute('src'); img.style.transform = '';
+  img.classList.remove('hidden'); vid.classList.add('hidden');
+
   const extra = p.status === 'trash'
     ? ` · deleted ${fmtDate(p.trashedAt)} · ${plural(daysLeft(p), 'day')} left`
-    : ` · kept ${fmtDate(p.reviewedAt)}`;
+    : p.status === 'kept' ? ` · kept ${fmtDate(p.reviewedAt)}` : '';
   $('viewerMeta').textContent = `${p.name ? p.name + ' · ' : ''}${infoText(p)}${extra}`;
+  pvActions(p, fromSwipe);
 
+  if (isVideo(p)) {
+    const u = fromSwipe ? await fullUrl(p) : await loadFull(p);
+    if (token !== pv.token) return;
+    if (u) {
+      if (u.startsWith('blob:') && !fromSwipe) pv.urls.push(u);
+      vid.poster = thumbUrlNow(p) || '';
+      vid.src = u;
+      vid.classList.remove('hidden'); img.classList.add('hidden');
+      vid.play().catch(() => {});
+    }
+    return;
+  }
+  // Sharpen in steps; each step replaces the picture in place.
+  if (p.width && p.height) pvFit(p.width, p.height);
+  // (iPhone thumbnails are square crops, so the app's first step there is the screen-size picture.)
+  const thumb = NATIVE ? null : thumbUrlNow(p);
+  if (thumb) await pvShow(thumb, token);
+  const full = fromSwipe ? await fullUrl(p) : await loadFull(p);
+  if (full?.startsWith('blob:') && !fromSwipe) pv.urls.push(full);
+  await pvShow(full, token);
+  loadDetail();
+}
+
+function pvActions(p, fromSwipe) {
   const actions = $('viewerActions');
   actions.textContent = '';
   const add = (label, cls, fn) => {
     const b = document.createElement('button');
-    b.textContent = label; b.className = cls;
-    b.onclick = async () => { await fn(); closeViewer(); render(); };
+    b.type = 'button'; b.textContent = label; b.className = cls;
+    b.onclick = async () => { closeViewer(); await fn(); if (!fromSwipe) render(); };
     actions.append(b);
   };
-  if (p.status === 'trash') {
-    add('↩︎ Restore (keep it)', 'keep', () => setStatus(p, 'kept'));
-    add('Put back in To review', '', () => setStatus(p, 'pending'));
-    add(NATIVE ? 'Delete from phone now' : 'Delete forever now', 'trash', async () => {
+  if (fromSwipe) {
+    add('✕ Delete', 'decide trash', () => decide('trash'));
+    add('✓ Keep', 'decide keep', () => decide('kept'));
+  } else if (p.status === 'trash') {
+    add('Restore', 'keep', () => setStatus(p, 'kept'));
+    add('Back to To review', '', () => setStatus(p, 'pending'));
+    add(NATIVE ? 'Delete from phone now' : 'Delete forever', 'trash', async () => {
       if (await removeForever([p.id])) deletedToast(`Deleted ${itemWord(1, [p])}`);
       else toast('Not deleted');
     });
   } else {
     add('Move to Deleted', 'trash', () => setStatus(p, 'trash'));
-    add('Put back in To review', '', () => setStatus(p, 'pending'));
+    add('Back to To review', '', () => setStatus(p, 'pending'));
   }
-  add('Close', '', async () => {});
-  $('viewer').classList.remove('hidden');
 }
+
 function closeViewer() {
-  $('viewer').classList.add('hidden');
+  const viewer = $('viewer');
+  if (viewer.classList.contains('hidden')) return;
+  viewer.classList.add('hidden');
+  viewer.style.backgroundColor = '';
+  pv.token = null; pv.p = null;
   const vid = $('viewerVideo');
   vid.pause(); vid.removeAttribute('src'); vid.load();
-  if (viewerUrl?.startsWith('blob:')) URL.revokeObjectURL(viewerUrl);
-  viewerUrl = null;
+  $('viewerImg').removeAttribute('src');
+  pv.urls.forEach((u) => URL.revokeObjectURL(u));
+  pv.urls = [];
 }
 
 /* ---------- Reminders ---------- */
@@ -1276,7 +1522,7 @@ function bind() {
     else if ((e.metaKey || e.ctrlKey) && e.key === 'z') undo();
   });
 
-  $('viewer').addEventListener('click', (e) => { if (e.target.id === 'viewer') closeViewer(); });
+  setupViewerGestures();
 
   $('restoreAllBtn').onclick = async () => {
     const list = byStatus('trash');

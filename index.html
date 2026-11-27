@@ -141,17 +141,22 @@
         <svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>
       </button>
     </div>
-    <p class="swiper-hint">Right to keep · left to delete · down to go back</p>
+    <p class="swiper-hint">Tap to see full size · right to keep · left to delete</p>
   </div>
 
   <!-- Photo viewer / actions for kept & deleted -->
-  <div class="sheet-backdrop hidden" id="viewer">
-    <div class="viewer">
-      <img id="viewerImg" alt="" />
+  <div class="photo-viewer hidden" id="viewer" role="dialog" aria-modal="true" aria-label="Photo">
+    <div class="pv-stage" id="pvStage">
+      <img id="viewerImg" alt="" draggable="false" />
       <video id="viewerVideo" class="hidden" controls playsinline></video>
-      <div class="viewer-meta" id="viewerMeta"></div>
-      <div class="viewer-actions" id="viewerActions"></div>
     </div>
+    <div class="pv-top">
+      <button type="button" class="pv-close" id="viewerClose" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+      <div class="pv-meta" id="viewerMeta"></div>
+    </div>
+    <div class="pv-bottom" id="viewerActions"></div>
   </div>
 
   <!-- Settings -->
