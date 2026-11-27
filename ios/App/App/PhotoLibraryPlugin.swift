@@ -138,7 +138,8 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
                 try data.write(to: file, options: .atomic)
                 call.resolve(["path": file.absoluteString])
             } catch {
-                call.reject("Could not cache photo", nil, error)
+                // Phone full: hand the picture over directly instead of via a file.
+                call.resolve(["data": "data:image/jpeg;base64," + data.base64EncodedString()])
             }
         }
     }
@@ -169,7 +170,8 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
                         self.remember(dest)
                         call.resolve(["path": dest.absoluteString])
                     } catch {
-                        call.reject("Could not copy video", nil, error)
+                        let full = (error as NSError).code == NSFileWriteOutOfSpaceError
+                        call.reject(full ? "Not enough free space to play this video" : "Could not copy video", full ? "NO_SPACE" : nil, error)
                     }
                 } else {
                     // Slo-mo and edited videos come as compositions: export to MP4.
