@@ -20,6 +20,13 @@ const DEFAULTS = { dailyGoal: 100, retentionDays: 10, reminderTime: '20:00', rem
 const DAY = 24 * 60 * 60 * 1000;
 
 const settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('settings') || '{}') };
+// A completely full phone makes saving throw; the app must keep working anyway.
+{
+  const set = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (k, v) {
+    try { set.call(this, k, v); } catch (e) { console.warn('Could not save', k, e); }
+  };
+}
 const saveSettings = () => localStorage.setItem('settings', JSON.stringify(settings));
 
 const stats = JSON.parse(localStorage.getItem('stats') || '{}'); // { 'YYYY-MM-DD': reviewedCount }
@@ -146,8 +153,8 @@ function daysLeft(p) {
 /* ---------- Images (thumbnails + full size) ---------- */
 
 async function nativeImage(id, size) {
-  const { path } = await Lib.getImage({ id, size });
-  return Cap.convertFileSrc(path);
+  const { path, data } = await Lib.getImage({ id, size });
+  return data || Cap.convertFileSrc(path);   // data: when the phone is too full for a file
 }
 
 // Synchronous when we already have it (web thumbs are stored blobs).
@@ -177,7 +184,10 @@ async function loadFull(p) {
       try {
         const { path } = await Lib.getVideo({ id: p.id });
         return Cap.convertFileSrc(path);
-      } catch { return null; }
+      } catch (e) {
+        if (e?.code === 'NO_SPACE') { toast('Phone is full, so this video can’t play. You can still keep or delete it.'); showFullBanner(); }
+        return null;
+      }
     }
     try { return await nativeImage(p.id, 2048); } catch { return loadThumb(p); }
   }
@@ -584,6 +594,7 @@ async function setStatus(p, status) {
   } else {
     await db.putMeta(p);
   }
+  if (!db.storageOk()) showFullBanner();
 }
 
 /* ---------- Swipe view ---------- */
@@ -1300,7 +1311,22 @@ function bind() {
   });
 }
 
+// Phone completely full: say why progress isn't saved, and point at what frees space fastest.
+function showFullBanner() {
+  if (!NATIVE) return;
+  $('fullText').innerHTML = IOS
+    ? '<b>Your iPhone is full.</b> Swipe Clean can’t save your progress until there’s a little space. Delete a few big videos, then empty <b>Recently Deleted</b> in Photos to free the space.'
+    : '<b>Your phone is full.</b> Swipe Clean can’t save your progress until there’s a little space. Delete a few big videos first.';
+  $('fullBar').classList.remove('hidden');
+}
+
 function setupSort() {
+  $('fullBtn').onclick = () => {
+    settings.sortOrder = 'largest';
+    saveSettings();
+    setTab('pending');
+    renderGrid();
+  };
   const sel = $('sortSelect');
   sel.innerHTML = Object.entries(SORTS).map(([v, label]) => `<option value="${v}">${label}</option>`).join('');
   sel.onchange = () => {
@@ -1336,6 +1362,7 @@ async function init() {
     toast(`${settings.dailyGoal - todayCount()} left for today's goal`);
   }
   maybeNotify();
+  if (!db.storageOk()) showFullBanner();
   if (NATIVE) {
     // Daily reminder is on by default: ask for notifications once, on first launch.
     if (!settings.reminderAsked) {
