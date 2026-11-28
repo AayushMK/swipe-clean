@@ -332,6 +332,9 @@ final class Server {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
     private var status: NSStatusItem!
+    private var window: NSWindow?
+    private let codeLabel = NSTextField(labelWithString: "")
+    private let infoLabel = NSTextField(wrappingLabelWithString: "")
 
     func applicationDidFinishLaunching(_ n: Notification) {
         AppDelegate.shared = self
@@ -343,11 +346,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         Server.shared.start()
         refreshMenu()
+        showWindow()
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refreshMenu() }
     }
 
+    /// A small window with the pairing code, so you don't have to find the menu bar icon
+    /// (on MacBooks it can hide behind the camera notch). Opening the app again shows it again.
+    func showWindow() {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 300), styleMask: [.titled, .closable],
+                             backing: .buffered, defer: false)
+            w.title = "Swipe Clean Companion"
+            w.isReleasedWhenClosed = false
+            let title = NSTextField(labelWithString: "Pairing code")
+            title.font = .systemFont(ofSize: 13, weight: .medium); title.textColor = .secondaryLabelColor
+            codeLabel.font = .monospacedDigitSystemFont(ofSize: 44, weight: .semibold)
+            infoLabel.font = .systemFont(ofSize: 13)
+            let newCode = NSButton(title: "New code", target: self, action: #selector(newCode))
+            let folder = NSButton(title: "Add a folder…", target: self, action: #selector(addFolder))
+            let buttons = NSStackView(views: [newCode, folder])
+            let stack = NSStackView(views: [title, codeLabel, infoLabel, buttons])
+            stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
+            stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+            infoLabel.preferredMaxLayoutWidth = 370
+            w.contentView = stack
+            w.center()
+            window = w
+        }
+        refreshMenu()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow(); return true
+    }
+
     func refreshMenu() {
+        let codeNow = Pairing.shared.current()
+        codeLabel.stringValue = "\(codeNow.prefix(3)) \(codeNow.suffix(3))"
+        let paired = Array(Set(Store.shared.config.tokens.values)).sorted()
+        var photos = "Photos library: not included (turn it on from the menu bar icon)"
+        if Store.shared.config.includePhotosLibrary {
+            switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+            case .authorized: photos = "Photos library: included ✓"
+            case .notDetermined: photos = "Photos library: waiting for your permission"
+            default: photos = "Photos library: access is off — System Settings → Privacy & Security → Photos"
+            }
+        }
+        let folders = Store.shared.config.folders.isEmpty ? "Folders: none" : "Folders: " + Store.shared.config.folders.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        let pairedText = paired.isEmpty ? "No phones paired yet" : "Paired: " + paired.joined(separator: ", ")
+        infoLabel.stringValue = [
+            "On your phone: Swipe Clean → Your computer → tap this Mac → type the code.",
+            "Phone and Mac must be on the same Wi-Fi. The code changes every 5 minutes.",
+            "", pairedText, photos, folders,
+        ].joined(separator: "\n")
         let m = NSMenu()
+        m.addItem(withTitle: "Show pairing window", action: #selector(showWindowAction), keyEquivalent: "").target = self
         let code = Pairing.shared.current()
         m.addItem(withTitle: "Pairing code:  \(code.prefix(3)) \(code.suffix(3))", action: nil, keyEquivalent: "")
         m.addItem(withTitle: "Enter it in Swipe Clean → Connect a computer", action: nil, keyEquivalent: "")
@@ -371,6 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func newCode() { Pairing.shared.rotate() }
+    @objc func showWindowAction() { showWindow() }
     @objc func togglePhotos() {
         Store.shared.config.includePhotosLibrary.toggle(); Store.shared.save()
         if Store.shared.config.includePhotosLibrary { PHPhotoLibrary.requestAuthorization(for: .readWrite) { _ in } }
