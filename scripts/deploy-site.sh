@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 split=$(git subtree split --prefix www main)
 export GIT_INDEX_FILE="$(git rev-parse --git-dir)/deploy-index"
 git read-tree "$split"
+git rm -r --cached --quiet --ignore-unmatch models   # face models are for the apps only
 if [ -f SwipeClean.apk ]; then
   blob=$(git hash-object -w SwipeClean.apk)
   git update-index --add --cacheinfo 100644,"$blob",SwipeClean.apk

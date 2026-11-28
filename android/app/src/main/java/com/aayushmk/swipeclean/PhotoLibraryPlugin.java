@@ -43,6 +43,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -421,6 +422,12 @@ public class PhotoLibraryPlugin extends Plugin {
     // Finds near-duplicates, bursts and same-scene photos. People needs the face model (phase 2).
 
     private static final Map<String, long[]> prints = new HashMap<>();   // id -> [dHash, colour bytes packed in 6 longs]
+    // Faces (People): id -> list of [x, y, w, h, 128-number embedding]; photos already checked for faces
+    private static final Map<String, List<float[]>> faces = new HashMap<>();
+    private static final Set<String> faceDone = new HashSet<>();
+    private static boolean facesLoaded = false;
+    private FaceEngine faceEngine;
+    private boolean faceEngineFailed = false;
     private static boolean indexLoaded = false, indexing = false;
     private final List<PluginCall> indexWaiters = new ArrayList<>();
 
@@ -514,9 +521,11 @@ public class PhotoLibraryPlugin extends Plugin {
         }
         new Thread(() -> {
             loadIndex();
+            loadFaces();
             List<String> ids = allIds();
             Set<String> live = new HashSet<>(ids);
             synchronized (prints) { prints.keySet().retainAll(live); }
+            synchronized (faces) { faces.keySet().retainAll(live); faceDone.retainAll(live); }
             int total = ids.size(), done = 0;
             for (String id : ids) {
                 boolean have;
@@ -525,11 +534,17 @@ public class PhotoLibraryPlugin extends Plugin {
                     long[] v = fingerprint(id);
                     if (v != null) synchronized (prints) { prints.put(id, v); }
                 }
+                if (!isVideo(id)) {
+                    boolean faced;
+                    synchronized (faces) { faced = faceDone.contains(id); }
+                    if (!faced) analyzeFaces(id);
+                }
                 done++;
                 if (done % 25 == 0) progress(done, total);
-                if (done % 500 == 0) saveIndex();
+                if (done % 500 == 0) { saveIndex(); saveFaces(); }
             }
             saveIndex();
+            saveFaces();
             progress(total, total);
             List<PluginCall> ws;
             synchronized (indexWaiters) { indexing = false; ws = new ArrayList<>(indexWaiters); indexWaiters.clear(); }
@@ -547,9 +562,16 @@ public class PhotoLibraryPlugin extends Plugin {
 
     private JSObject statusObj(int total) {
         JSObject st = new JSObject();
-        synchronized (prints) { st.put("indexed", Math.min(prints.size(), total)); }
+        loadFaces();
+        int nFaces = 0, images = 0;
+        synchronized (faces) { for (List<float[]> l : faces.values()) nFaces += l.size(); }
+        for (String id : allIds()) if (!isVideo(id)) images++;
+        int indexed;
+        synchronized (prints) { indexed = prints.size(); }
+        synchronized (faces) { indexed = Math.min(indexed, faceDone.size() + (total - images)); }   // both passes done
+        st.put("indexed", Math.min(indexed, total));
         st.put("total", total);
-        st.put("faces", 0);
+        st.put("faces", nFaces);
         st.put("running", indexing);
         return st;
     }
@@ -643,12 +665,152 @@ public class PhotoLibraryPlugin extends Plugin {
         return new long[] { 0, 0 };
     }
 
-    /** People needs the face model (phase 2); Android returns none for now. */
+    // ---------- People (face recognition) ----------
+
+    private File faceDir() { File d = new File(getContext().getCacheDir(), "faces"); d.mkdirs(); return d; }
+    private File facesFile() { return new File(getContext().getFilesDir(), "faces-v2.bin"); }
+
+    private void analyzeFaces(String id) {
+        try {
+            if (faceEngine == null && !faceEngineFailed) {
+                try { faceEngine = new FaceEngine(getContext()); }
+                catch (Throwable t) { faceEngineFailed = true; android.util.Log.e(FaceEngine.TAG, "Face models failed to load", t); }
+            }
+            if (faceEngine == null) return;
+            Bitmap bmp = load(id, 1024);
+            if (bmp == null) return;
+            if (bmp.getConfig() != Bitmap.Config.ARGB_8888) bmp = bmp.copy(Bitmap.Config.ARGB_8888, false);
+            List<FaceEngine.Face> found = faceEngine.analyze(bmp);
+            List<float[]> rows = new ArrayList<>();
+            int k = 0;
+            for (FaceEngine.Face f : found) {
+                float[] row = new float[4 + f.embedding.length];
+                row[0] = f.x; row[1] = f.y; row[2] = f.w; row[3] = f.h;
+                System.arraycopy(f.embedding, 0, row, 4, f.embedding.length);
+                rows.add(row);
+                saveFaceThumb(bmp, f, faceName(id, k++));
+            }
+            synchronized (faces) { faces.put(id, rows); faceDone.add(id); }
+        } catch (Throwable t) {
+            android.util.Log.w(FaceEngine.TAG, "faces failed for " + id, t);
+            synchronized (faces) { faceDone.add(id); }   // don't retry a broken photo forever
+        }
+    }
+
+    private static String faceName(String id, int k) { return id + "_" + k + ".jpg"; }
+
+    private void saveFaceThumb(Bitmap bmp, FaceEngine.Face f, String name) {
+        try {
+            float side = Math.max(f.w, f.h) * 1.35f, cx = f.x + f.w / 2, cy = f.y + f.h / 2;
+            int x = (int) Math.max(0, cx - side / 2), y = (int) Math.max(0, cy - side / 2);
+            int s = (int) Math.min(side, Math.min(bmp.getWidth() - x, bmp.getHeight() - y));
+            if (s < 8) return;
+            Bitmap crop = Bitmap.createScaledBitmap(Bitmap.createBitmap(bmp, x, y, s, s), 120, 120, true);
+            try (FileOutputStream out = new FileOutputStream(new File(faceDir(), name))) {
+                crop.compress(Bitmap.CompressFormat.JPEG, 80, out);
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void loadFaces() {
+        synchronized (faces) {
+            if (facesLoaded) return;
+            facesLoaded = true;
+            File f = facesFile();
+            if (!f.exists()) return;
+            try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f)))) {
+                int n = in.readInt();
+                for (int i = 0; i < n; i++) {
+                    String id = in.readUTF();
+                    int m = in.readInt();
+                    List<float[]> rows = new ArrayList<>();
+                    for (int j = 0; j < m; j++) {
+                        float[] row = new float[in.readInt()];
+                        for (int k = 0; k < row.length; k++) row[k] = in.readFloat();
+                        rows.add(row);
+                    }
+                    faces.put(id, rows);
+                    faceDone.add(id);
+                }
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private void saveFaces() {
+        synchronized (faces) {
+            try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(facesFile())))) {
+                out.writeInt(faceDone.size());
+                for (String id : faceDone) {
+                    List<float[]> rows = faces.containsKey(id) ? faces.get(id) : new ArrayList<>();
+                    out.writeUTF(id);
+                    out.writeInt(rows.size());
+                    for (float[] row : rows) { out.writeInt(row.length); for (float x : row) out.writeFloat(x); }
+                }
+            } catch (Exception ignored) { }
+        }
+    }
+
+    /** Groups faces by person: cosine similarity against each group's average face. */
     @PluginMethod
     public void getPeople(PluginCall call) {
-        JSObject ret = new JSObject();
-        ret.put("people", new JSArray());
-        call.resolve(ret);
+        double strict = call.getDouble("strictness", 0.5);
+        getBridge().execute(() -> {
+            loadFaces();
+            // SFace: same person is usually cosine ≥ ~0.36 (OpenCV's suggested threshold).
+            float minCos = (float) (0.22 + 0.32 * strict);
+            List<float[]> sums = new ArrayList<>(), cents = new ArrayList<>();
+            List<List<String[]>> members = new ArrayList<>();
+            Map<String, List<float[]>> snap;
+            synchronized (faces) { snap = new HashMap<>(faces); }
+            List<String> ids = new ArrayList<>(snap.keySet());
+            Collections.sort(ids);
+            for (String id : ids) {
+                List<float[]> rows = snap.get(id);
+                for (int k = 0; k < rows.size(); k++) {
+                    float[] row = rows.get(k);
+                    int dim = row.length - 4;
+                    int best = -1; float bestCos = -2;
+                    for (int g = 0; g < cents.size(); g++) {
+                        float[] c = cents.get(g);
+                        float dot = 0;
+                        for (int i = 0; i < dim; i++) dot += c[i] * row[4 + i];
+                        if (dot > bestCos) { bestCos = dot; best = g; }
+                    }
+                    if (best >= 0 && bestCos >= minCos) {
+                        float[] sum = sums.get(best), c = cents.get(best);
+                        double n = 0;
+                        for (int i = 0; i < dim; i++) { sum[i] += row[4 + i]; n += sum[i] * sum[i]; }
+                        n = Math.sqrt(n);
+                        for (int i = 0; i < dim; i++) c[i] = (float) (sum[i] / n);
+                        members.get(best).add(new String[] { id, String.valueOf(k) });
+                    } else {
+                        float[] v = new float[dim];
+                        System.arraycopy(row, 4, v, 0, dim);
+                        sums.add(v.clone()); cents.add(v);
+                        List<String[]> m = new ArrayList<>();
+                        m.add(new String[] { id, String.valueOf(k) });
+                        members.add(m);
+                    }
+                }
+            }
+            List<JSObject> people = new ArrayList<>();
+            for (List<String[]> m : members) {
+                Set<String> photoIds = new java.util.LinkedHashSet<>();
+                for (String[] x : m) photoIds.add(x[0]);
+                if (photoIds.size() < 3) continue;   // a "person" needs a few photos
+                JSObject p = new JSObject();
+                p.put("ids", new JSArray(photoIds));
+                p.put("count", photoIds.size());
+                p.put("thumb", Uri.fromFile(new File(faceDir(), faceName(m.get(0)[0], Integer.parseInt(m.get(0)[1])))).toString());
+                people.add(p);
+            }
+            people.sort((a, b) -> Integer.compare(b.optInt("count"), a.optInt("count")));
+            JSArray out = new JSArray();
+            for (int i = 0; i < Math.min(40, people.size()); i++) out.put(people.get(i));
+            JSObject ret = new JSObject();
+            ret.put("people", out);
+            call.resolve(ret);
+        });
     }
 
     @PluginMethod

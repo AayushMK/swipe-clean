@@ -409,3 +409,9 @@ html, body, button, .cell, .card { touch-action: manipulation; }
 .viewing .tools-row { display: none; }
 .cell.dup-first::before { content: 'Best'; position: absolute; left: 4px; top: 4px; z-index: 1; font-size: 11px; font-weight: 700;
   padding: 2px 6px; border-radius: 6px; background: var(--keep); color: #062; }
+
+/* Grid size chosen by pinching */
+.grid.fixed-cols { grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
+/* Swipe card being pinch-zoomed: let the photo grow past the card's edges */
+.card.zooming { overflow: visible; z-index: 5; }
+.card.zooming img, .card.zooming video { position: relative; z-index: 5; }

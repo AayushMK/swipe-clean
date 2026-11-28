@@ -19,7 +19,8 @@ One codebase (`www/`) ships two ways:
 - Swipe right or ✓ to keep. Swipe left or ✕ to delete. ↶ undoes.
 - **Share** selected photos in original quality (Share, or one .zip that chat apps send untouched as a document; iPhone can convert HEIC to JPEG). Copies are temporary and deleted right after.
 - **Similar photos** (button in the full-size view) and **Find duplicates** (extra copies pre-selected for deleting). Uses an index built on the phone: Apple Vision image fingerprints on iPhone, a small shape/colour fingerprint on Android.
-- **People (beta, iPhone):** faces found with Apple Vision and grouped by a general image fingerprint. Rough; a real face-recognition model is phase 2.
+- **People (beta):** Android uses real face recognition on the phone (OpenCV's YuNet finds faces, SFace recognises them, run with ONNX Runtime). iPhone still uses the rough phase-1 grouping until SFace is converted to Core ML.
+- **Zoom:** pinch the grid to change photos per row; pinch a swipe card to zoom in place; the full-size view zooms to the photo's real pixels.
 - Daily goal (default 100) with progress ring and streak.
 - Reminder (apps): every day, or only on days you take lots of photos (you pick how many and what time). On iPhone the busy-day check uses Background App Refresh, so iOS decides exactly when it runs.
 - **Deleted** holds photos for N days (default 10) so you can restore them. After that:
