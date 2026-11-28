@@ -665,6 +665,108 @@ public class PhotoLibraryPlugin extends Plugin {
         return new long[] { 0, 0 };
     }
 
+    // ---------- Computers (Swipe Clean Companion on a Mac / PC) ----------
+
+    /** Finds companions on the Wi-Fi for ~3 s and returns name, address, port and announced fingerprint. */
+    @PluginMethod
+    public void discoverComputers(PluginCall call) {
+        android.net.nsd.NsdManager nsd = (android.net.nsd.NsdManager) getContext().getSystemService(android.content.Context.NSD_SERVICE);
+        List<android.net.nsd.NsdServiceInfo> found = java.util.Collections.synchronizedList(new ArrayList<>());
+        android.net.nsd.NsdManager.DiscoveryListener l = new android.net.nsd.NsdManager.DiscoveryListener() {
+            public void onDiscoveryStarted(String t) { }
+            public void onDiscoveryStopped(String t) { }
+            public void onStartDiscoveryFailed(String t, int e) { }
+            public void onStopDiscoveryFailed(String t, int e) { }
+            public void onServiceFound(android.net.nsd.NsdServiceInfo i) { found.add(i); }
+            public void onServiceLost(android.net.nsd.NsdServiceInfo i) { }
+        };
+        nsd.discoverServices("_swipeclean._tcp", android.net.nsd.NsdManager.PROTOCOL_DNS_SD, l);
+        new Thread(() -> {
+            try { Thread.sleep(3000); } catch (InterruptedException ignored) { }
+            try { nsd.stopServiceDiscovery(l); } catch (Exception ignored) { }
+            JSArray out = new JSArray();
+            for (android.net.nsd.NsdServiceInfo info : new ArrayList<>(found)) {   // resolve one at a time
+                final Object lock = new Object();
+                final android.net.nsd.NsdServiceInfo[] res = new android.net.nsd.NsdServiceInfo[1];
+                nsd.resolveService(info, new android.net.nsd.NsdManager.ResolveListener() {
+                    public void onResolveFailed(android.net.nsd.NsdServiceInfo i, int e) { synchronized (lock) { lock.notify(); } }
+                    public void onServiceResolved(android.net.nsd.NsdServiceInfo i) { res[0] = i; synchronized (lock) { lock.notify(); } }
+                });
+                synchronized (lock) { try { lock.wait(4000); } catch (InterruptedException ignored) { } }
+                if (res[0] == null || res[0].getHost() == null) continue;
+                JSObject c = new JSObject();
+                c.put("name", res[0].getServiceName());
+                c.put("host", res[0].getHost().getHostAddress());
+                c.put("port", res[0].getPort());
+                byte[] fp = res[0].getAttributes().get("fp");
+                c.put("fp", fp == null ? "" : new String(fp, java.nio.charset.StandardCharsets.UTF_8));
+                out.put(c);
+            }
+            JSObject ret = new JSObject();
+            ret.put("computers", out);
+            call.resolve(ret);
+        }).start();
+    }
+
+    /** HTTPS to a paired computer; only the certificate whose SHA-256 matches `pin` is trusted. */
+    @PluginMethod
+    public void computerRequest(PluginCall call) {
+        String host = call.getString("host"), path = call.getString("path");
+        if (host == null || path == null) { call.reject("host and path are required"); return; }
+        int port = call.getInt("port", 8787);
+        String pin = call.getString("pin", "").toLowerCase();
+        String method = call.getString("method", "GET");
+        String token = call.getString("token", "");
+        boolean binary = Boolean.TRUE.equals(call.getBoolean("binary", false));
+        JSObject body = call.getObject("body", null);
+        new Thread(() -> {
+            final String[] seen = { "" };
+            final boolean[] mismatch = { false };
+            try {
+                javax.net.ssl.TrustManager tm = new javax.net.ssl.X509TrustManager() {
+                    public void checkClientTrusted(java.security.cert.X509Certificate[] c, String a) { }
+                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String a) throws java.security.cert.CertificateException {
+                        try {
+                            byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(chain[0].getEncoded());
+                            StringBuilder sb = new StringBuilder();
+                            for (byte b : h) sb.append(String.format("%02x", b));
+                            seen[0] = sb.toString();
+                        } catch (Exception e) { throw new java.security.cert.CertificateException(e); }
+                        if (!pin.isEmpty() && !pin.equals(seen[0])) { mismatch[0] = true; throw new java.security.cert.CertificateException("pin mismatch"); }
+                    }
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() { return new java.security.cert.X509Certificate[0]; }
+                };
+                javax.net.ssl.SSLContext ctx = javax.net.ssl.SSLContext.getInstance("TLS");
+                ctx.init(null, new javax.net.ssl.TrustManager[] { tm }, null);
+                String h = host.contains(":") ? "[" + host + "]" : host;
+                javax.net.ssl.HttpsURLConnection con = (javax.net.ssl.HttpsURLConnection) new java.net.URL("https://" + h + ":" + port + path).openConnection();
+                con.setSSLSocketFactory(ctx.getSocketFactory());
+                con.setHostnameVerifier((x, y) -> true);   // identity is checked by the pinned certificate instead
+                con.setConnectTimeout(8000);
+                con.setReadTimeout(30000);
+                con.setRequestMethod(method);
+                if (!token.isEmpty()) con.setRequestProperty("Authorization", "Bearer " + token);
+                if (body != null) {
+                    con.setDoOutput(true);
+                    con.setRequestProperty("Content-Type", "application/json");
+                    con.getOutputStream().write(body.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                int status = con.getResponseCode();
+                InputStream in = status >= 400 ? con.getErrorStream() : con.getInputStream();
+                java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                if (in != null) { byte[] b = new byte[65536]; int r; while ((r = in.read(b)) > 0) buf.write(b, 0, r); in.close(); }
+                JSObject ret = new JSObject();
+                ret.put("status", status);
+                ret.put("fp", seen[0]);
+                if (binary) ret.put("base64", android.util.Base64.encodeToString(buf.toByteArray(), android.util.Base64.NO_WRAP));
+                else ret.put("text", buf.toString("UTF-8"));
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject(mismatch[0] ? "This computer's identity changed. Pair it again." : "Couldn't reach the computer: " + e.getMessage());
+            }
+        }).start();
+    }
+
     // ---------- People (face recognition) ----------
 
     private File faceDir() { File d = new File(getContext().getCacheDir(), "faces"); d.mkdirs(); return d; }

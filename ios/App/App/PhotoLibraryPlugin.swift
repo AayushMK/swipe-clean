@@ -6,6 +6,8 @@ import Capacitor
 import BackgroundTasks
 import UserNotifications
 import Vision
+import Network
+import CryptoKit
 import CoreML
 import Accelerate
 import ImageIO
@@ -115,6 +117,8 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "findSimilar", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getPeople", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "findDuplicates", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "discoverComputers", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "computerRequest", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancelBusyCheck", returnType: CAPPluginReturnPromise),
     ]
 
@@ -497,6 +501,91 @@ public class PhotoLibraryPlugin: CAPPlugin, CAPBridgedPlugin {
         DispatchQueue.global(qos: .userInitiated).async {
             call.resolve(["groups": SimilarityIndex.shared.duplicates(maxDistance: Float(maxD))])
         }
+    }
+
+    // MARK: Computers (Swipe Clean Companion on a Mac / PC)
+
+    private var browser: NWBrowser?
+
+    /// Looks for companions on the Wi-Fi for ~3 s (Bonjour _swipeclean._tcp) and returns name, address and
+    /// the certificate fingerprint each one announces.
+    @objc func discoverComputers(_ call: CAPPluginCall) {
+        let params = NWParameters()
+        params.includePeerToPeer = true
+        let b = NWBrowser(for: .bonjourWithTXTRecord(type: "_swipeclean._tcp", domain: nil), using: params)
+        var results: [NWBrowser.Result] = []
+        b.browseResultsChangedHandler = { r, _ in results = Array(r) }
+        b.start(queue: .global(qos: .userInitiated))
+        browser = b
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            b.cancel()
+            let group = DispatchGroup()
+            var out: [[String: Any]] = []
+            let lock = NSLock()
+            for r in results {
+                guard case let .service(name, _, _, _) = r.endpoint else { continue }
+                var fp = ""
+                if case let .bonjour(txt) = r.metadata { fp = txt["fp"] ?? "" }
+                group.enter()
+                Self.resolve(r.endpoint) { host, port in
+                    if let host = host {
+                        lock.lock(); out.append(["name": name, "host": host, "port": port, "fp": fp]); lock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) { call.resolve(["computers": out]) }
+        }
+    }
+
+    /// Bonjour name → IPv4 address and port.
+    private static func resolve(_ endpoint: NWEndpoint, done: @escaping (String?, Int) -> Void) {
+        let p = NWParameters.tcp
+        if let ip = p.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.version = .v4 }
+        let c = NWConnection(to: endpoint, using: p)
+        var finished = false
+        let finish: (String?, Int) -> Void = { h, port in if !finished { finished = true; c.cancel(); done(h, port) } }
+        c.stateUpdateHandler = { st in
+            switch st {
+            case .ready:
+                if case let .hostPort(host, port)? = c.currentPath?.remoteEndpoint {
+                    var h = "\(host)"
+                    if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
+                    finish(h, Int(port.rawValue))
+                } else { finish(nil, 0) }
+            case .failed, .cancelled: finish(nil, 0)
+            default: break
+            }
+        }
+        c.start(queue: .global())
+        DispatchQueue.global().asyncAfter(deadline: .now() + 4) { finish(nil, 0) }
+    }
+
+    /// HTTPS request to a paired computer. Only a server whose certificate matches `pin` (SHA-256 of the
+    /// certificate) is accepted; with an empty pin the fingerprint is returned so the app can store it.
+    @objc func computerRequest(_ call: CAPPluginCall) {
+        guard let host = call.getString("host"), let path = call.getString("path") else { return call.reject("host and path are required") }
+        let port = call.getInt("port") ?? 8787
+        let hostPart = host.contains(":") ? "[\(host)]" : host
+        guard let url = URL(string: "https://\(hostPart):\(port)\(path)") else { return call.reject("Bad address") }
+        var req = URLRequest(url: url, timeoutInterval: call.getDouble("timeout") ?? 20)
+        req.httpMethod = call.getString("method") ?? "GET"
+        if let t = call.getString("token"), !t.isEmpty { req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
+        if let body = call.getObject("body"), let d = try? JSONSerialization.data(withJSONObject: body) {
+            req.httpBody = d; req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let pinner = PinningDelegate(pin: call.getString("pin") ?? "")
+        let session = URLSession(configuration: .ephemeral, delegate: pinner, delegateQueue: nil)
+        session.dataTask(with: req) { data, resp, err in
+            session.finishTasksAndInvalidate()
+            if let err = err { return call.reject(pinner.mismatch ? "This computer's identity changed. Pair it again." : err.localizedDescription) }
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let d = data ?? Data()
+            var ret: [String: Any] = ["status": status, "fp": pinner.seen]
+            if call.getBool("binary") ?? false { ret["base64"] = d.base64EncodedString() }
+            else { ret["text"] = String(decoding: d, as: UTF8.self) }
+            call.resolve(ret)
+        }.resume()
     }
 
     @objc func scheduleBusyCheck(_ call: CAPPluginCall) {
@@ -903,5 +992,25 @@ final class FaceEmbedder {
         let len = sqrt(v.reduce(0) { $0 + $1 * $1 })
         if len > 0 { for i in v.indices { v[i] /= len } }
         return v.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+}
+
+
+/// Accepts only the companion whose certificate hash matches the pin (or records it when no pin yet).
+final class PinningDelegate: NSObject, URLSessionDelegate {
+    let pin: String
+    var seen = ""
+    var mismatch = false
+    init(pin: String) { self.pin = pin.lowercased() }
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust,
+              let cert = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first else {
+            return completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+        seen = SHA256.hash(data: SecCertificateCopyData(cert) as Data).map { String(format: "%02x", $0) }.joined()
+        if pin.isEmpty || seen == pin { completionHandler(.useCredential, URLCredential(trust: trust)) }
+        else { mismatch = true; completionHandler(.cancelAuthenticationChallenge, nil) }
     }
 }

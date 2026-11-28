@@ -170,6 +170,7 @@ function thumbUrlNow(p) {
 }
 
 async function loadThumb(p) {
+  if (p.remote) return remoteImage(p, 360);
   const now = thumbUrlNow(p);
   if (now || !NATIVE) return now;
   try {
@@ -180,6 +181,7 @@ async function loadThumb(p) {
 }
 
 async function loadFull(p) {
+  if (p.remote) return isVideo(p) ? remoteImage(p, 1024) : remoteImage(p, 2048);
   if (NATIVE) {
     if (isVideo(p)) {
       try {
@@ -383,7 +385,7 @@ const thumbObserver = 'IntersectionObserver' in window
     for (const e of entries) {
       if (!e.isIntersecting) continue;
       thumbObserver.unobserve(e.target);
-      const p = photos.find((x) => x.id === e.target.dataset.id);
+      const p = remoteItems.get(e.target.dataset.id) || photos.find((x) => x.id === e.target.dataset.id);
       if (p) loadThumb(p).then((u) => { if (u) e.target.querySelector('img').src = u; });
     }
   }, { rootMargin: '600px' })
@@ -418,6 +420,12 @@ function makeCell(p) {
   cell.append(check);
   if (sel.ids.has(p.id)) cell.classList.add('sel');
   if (view?.kind === 'dups' && view.groups.some((g) => g[0] === p.id)) cell.classList.add('dup-first');
+  if (view?.kind === 'pcdups') {
+    const b = document.createElement('span');
+    b.className = 'src' + (p.remote ? '' : ' phone');
+    b.textContent = p.remote ? 'Computer' : 'Phone';
+    cell.append(b);
+  }
   if (tab === 'trash') {
     const left = daysLeft(p);
     const b = document.createElement('span');
@@ -440,6 +448,7 @@ function appendCells() {
 function renderGrid() {
   if (view) {
     const byId = new Map(photos.map((p) => [p.id, p]));
+    remoteItems.forEach((p, id) => byId.set(id, p));
     gridList = view.ids.map((id) => byId.get(id)).filter((p) => p && p.status !== 'trash');
   } else {
     gridList = sortList(byStatus(tab), tab);
@@ -638,12 +647,14 @@ function renderSelection() {
   const bar = $('selBar');
   bar.classList.toggle('hidden', !sel.on);
   if (!sel.on) return;
-  const key = view ? 'view' : tab;
+  const key = view ? ({ remote: 'remote', pcdups: 'pcdups' }[view.kind] || 'view') : tab;
   const actions = {
     pending: [['Share', '', 'share'], ['Delete', 'trash', 'trash'], ['Keep', 'keep', 'kept']],
     kept: [['Share', '', 'share'], ['Back to review', '', 'pending'], ['Delete', 'trash', 'trash']],
     trash: [['Restore', '', 'kept'], [NATIVE ? 'Delete from phone' : 'Delete permanently', 'trash', 'forever']],
     view: [['Share', 'keep', 'share'], ['Delete', 'trash', 'trash']],
+    remote: [['Move to Trash on computer', 'trash', 'pctrash']],
+    pcdups: [['Delete selected copies', 'trash', 'pcdelete']],
   }[key];
   if (bar.dataset.tab !== key) {
     bar.dataset.tab = key;
@@ -680,6 +691,7 @@ async function applyToSelected(to) {
   if (!list.length) return;
   const from = tab, n = list.length, what = itemWord(n, list);
   if (to === 'share') { openShare(list); return; }
+  if (to === 'pctrash' || to === 'pcdelete') { await deleteMixed(list); return; }
   if (to === 'forever') {
     if (!NATIVE && !confirm(`Remove ${what} for good? This can't be undone.`)) return;
     const ok = await removeForever(list.map((p) => p.id));
@@ -897,7 +909,14 @@ function renderViewBar() {
   $('viewTitle').textContent = view.title;
   const n = gridList.length;
   const scanning = indexState?.running ? ' · still scanning, more may appear' : '';
-  if (view.kind === 'dups') {
+  if (view.kind === 'pcdups') {
+    const extra = view.groups.reduce((a, g) => a + g.length - 1, 0);
+    $('viewSub').textContent = view.groups.length
+      ? `${plural(view.groups.length, 'photo')} with copies · ${extra} ${extra === 1 ? 'copy' : 'copies'} selected — check, then Delete`
+      : 'No copies found between this phone and the computer 🎉';
+  } else if (view.kind === 'remote') {
+    $('viewSub').textContent = n ? `${itemWord(n, gridList)} on this computer · Select to move to its Trash` : 'No photos found. Add a folder or the Photos library in the companion’s menu.';
+  } else if (view.kind === 'dups') {
     const extra = view.groups.reduce((a, g) => a + g.length - 1, 0);
     $('viewSub').textContent = view.groups.length
       ? `${plural(view.groups.length, 'group')} · ${extra} extra ${extra === 1 ? 'copy' : 'copies'} selected — check, then Delete${scanning}`
@@ -1101,6 +1120,235 @@ function setupFindAndShare() {
   }
 }
 
+
+/* ---------- Computers (Swipe Clean Companion on a Mac) ----------
+   The companion shows a 6-digit code in the Mac's menu bar. The phone finds it on the Wi-Fi, pairs
+   with the code, and from then on only talks to that computer's certificate (pinned). Photos never
+   leave your home network. */
+
+let computers = JSON.parse(localStorage.getItem('computers') || '[]');
+const remoteItems = new Map();   // 'r:<computer>:<item>' -> photo-like object
+const saveComputers = () => localStorage.setItem('computers', JSON.stringify(computers));
+const phoneName = () => (IOS ? 'iPhone' : 'Android phone');
+
+async function rediscover(comp) {
+  try {
+    const { computers: found } = await Lib.discoverComputers();
+    const m = found.find((c) => c.fp && c.fp === comp.fp) || found.find((c) => c.name === comp.name);
+    if (m) { comp.host = m.host; comp.port = m.port; saveComputers(); return true; }
+  } catch { /* ignore */ }
+  return false;
+}
+
+async function pcCall(comp, path, { method = 'GET', body, binary = false } = {}) {
+  const go = () => Lib.computerRequest({ host: comp.host, port: comp.port, path, method, body, token: comp.token, pin: comp.fp, binary });
+  let r;
+  try { r = await go(); } catch (e) {
+    if (/identity changed/.test(e?.message || '')) throw e;
+    if (!(await rediscover(comp))) throw new Error(`Can't reach ${comp.name}. Make sure Swipe Clean Companion is running and you're on the same Wi-Fi.`);
+    r = await go();
+  }
+  if (r.status === 401) throw new Error(`${comp.name} doesn't know this phone any more. Connect it again.`);
+  if (r.status >= 400) throw new Error(`${comp.name} said: ${(() => { try { return JSON.parse(r.text).error; } catch { return r.status; } })()}`);
+  return binary ? r.base64 : JSON.parse(r.text);
+}
+
+const remoteImgCache = new Map();
+function remoteImage(p, size) {
+  const key = `${p.id}@${size}`;
+  if (!remoteImgCache.has(key)) {
+    remoteImgCache.set(key, pcCall(p.remote.comp, `/thumb?id=${encodeURIComponent(p.remote.itemId)}&size=${size}`, { binary: true })
+      .then((b64) => `data:image/jpeg;base64,${b64}`)
+      .catch(() => { remoteImgCache.delete(key); return null; }));
+  }
+  return remoteImgCache.get(key);
+}
+
+async function loadComputerItems(comp) {
+  const { items } = await pcCall(comp, '/items');
+  for (const id of [...remoteItems.keys()]) if (id.startsWith(`r:${comp.id}:`)) remoteItems.delete(id);
+  for (const it of items) {
+    const id = `r:${comp.id}:${it.id}`;
+    remoteItems.set(id, { id, remote: { comp, itemId: it.id, source: it.source }, name: it.name, size: it.size, taken: it.taken,
+      width: it.width, height: it.height, kind: it.kind, duration: it.duration, status: 'remote' });
+  }
+  return [...remoteItems.values()].filter((p) => p.remote.comp === comp);
+}
+
+async function browseComputer(comp) {
+  $('pcSheet').classList.add('hidden');
+  busy(`Loading photos from ${comp.name}…`);
+  try {
+    const list = (await loadComputerItems(comp)).sort((a, b) => b.taken - a.taken);
+    openView({ kind: 'remote', title: comp.name, ids: list.map((p) => p.id), face: null, comp });
+  } catch (e) { toast(e.message); } finally { busy(''); }
+}
+
+// Copies of the same photo on the phone and on the computer: same picture size and either the
+// same file size or the same capture time. Keep the phone copy; computer copies start selected.
+async function findComputerCopies(comp) {
+  $('pcSheet').classList.add('hidden');
+  busy(`Comparing your phone with ${comp.name}…`);
+  try {
+    const remote = await loadComputerItems(comp);
+    const dims = (p) => `${p.kind}|${Math.min(p.width, p.height)}x${Math.max(p.width, p.height)}`;
+    const phoneByDims = new Map();
+    for (const p of photos) {
+      if (p.status === 'trash' || !p.width) continue;
+      const k = dims(p);
+      if (!phoneByDims.has(k)) phoneByDims.set(k, []);
+      phoneByDims.get(k).push(p);
+    }
+    const same = (a, b) => (a.size && b.size && a.size === b.size) || Math.abs((a.taken || 0) - (b.taken || 0)) < 2000;
+    const groups = new Map();   // phone id (or first computer id) -> ids
+    const used = new Set();
+    for (const r of remote) {
+      if (!r.width) continue;
+      const match = (phoneByDims.get(dims(r)) || []).find((p) => same(p, r));
+      if (match) {
+        if (!groups.has(match.id)) groups.set(match.id, [match.id]);
+        groups.get(match.id).push(r.id);
+        used.add(r.id);
+      }
+    }
+    // copies within the computer itself (same size, picture size and time)
+    const seen = new Map();
+    for (const r of remote) {
+      if (used.has(r.id) || !r.size) continue;
+      const k = `${dims(r)}|${r.size}`;
+      if (seen.has(k)) { const g = seen.get(k); if (!groups.has(g)) groups.set(g, [g]); groups.get(g).push(r.id); }
+      else seen.set(k, r.id);
+    }
+    const list = [...groups.values()];
+    openView({ kind: 'pcdups', title: `Copies on ${comp.name}`, ids: list.flat(), groups: list, face: null, comp });
+    if (list.length) {
+      setSelecting(true);
+      sel.ids = new Set(list.flatMap((g) => g.slice(1)));
+      render();
+    }
+  } catch (e) { toast(e.message); } finally { busy(''); }
+}
+
+// Delete a mix of phone photos (→ Deleted tab, as usual) and computer photos (→ that computer's Trash).
+async function deleteMixed(list, { confirmFirst = true } = {}) {
+  const remote = list.filter((p) => p.remote), local = list.filter((p) => !p.remote);
+  const byComp = new Map();
+  remote.forEach((p) => { const c = p.remote.comp; if (!byComp.has(c)) byComp.set(c, []); byComp.get(c).push(p); });
+  if (confirmFirst && remote.length) {
+    const where = [...byComp.keys()].map((c) => c.name).join(', ');
+    const fromPhotos = remote.some((p) => p.remote.source === 'photos');
+    if (!confirm(`Move ${itemWord(remote.length, remote)} to the Trash on ${where}?${fromPhotos ? '\n\nPhotos-app items go to Recently Deleted; your Mac will ask you to confirm.' : ''}`)) return;
+  }
+  busy(remote.length ? 'Moving to the computer’s Trash…' : '');
+  let moved = 0;
+  try {
+    for (const [comp, items] of byComp) {
+      const { deleted } = await pcCall(comp, '/trash', { method: 'POST', body: { ids: items.map((p) => p.remote.itemId) } });
+      const gone = new Set(deleted);
+      items.forEach((p) => { if (gone.has(p.remote.itemId)) { remoteItems.delete(p.id); moved++; } });
+    }
+  } catch (e) { toast(e.message); }
+  busy('');
+  if (local.length) { await setStatusMany(local, 'trash'); }
+  if (view) {
+    const gone = new Set([...list.filter((p) => !remoteItems.has(p.id) && p.remote).map((p) => p.id), ...local.map((p) => p.id)]);
+    view.ids = view.ids.filter((id) => !gone.has(id));
+    if (view.groups) {
+      view.groups = view.groups.map((g) => g.filter((id) => !gone.has(id))).filter((g) => g.length > 1);
+      view.ids = view.groups.flat();   // photos left without copies drop out of the list
+    }
+  }
+  setSelecting(false);
+  render();
+  const parts = [];
+  if (moved) parts.push(`${itemWord(moved, remote)} moved to the computer’s Trash`);
+  if (local.length) parts.push(`${itemWord(local.length, local)} moved to Deleted`);
+  if (parts.length) toast(parts.join(' · '));
+}
+
+function renderComputersButton() {
+  const c = computers[0];
+  $('pcTitle').textContent = c ? c.name : 'Your computer';
+  $('pcSub').textContent = c ? 'Browse its photos or remove copies' : 'See photos on your Mac and remove copies';
+}
+
+async function openComputers() {
+  $('pcSheet').classList.remove('hidden');
+  const body = $('pcBody');
+  body.textContent = '';
+  computers.forEach((c, i) => {
+    const card = document.createElement('div');
+    card.className = 'pc-card';
+    card.innerHTML = `<b></b><small>Paired · photos stay on your home network</small>
+      <div class="pc-actions"><button class="primary" data-a="copies">Find copies</button><button data-a="browse">Browse photos</button><button class="danger" data-a="forget">Forget</button></div>`;
+    card.querySelector('b').textContent = c.name;
+    card.querySelector('[data-a=copies]').onclick = () => findComputerCopies(c);
+    card.querySelector('[data-a=browse]').onclick = () => browseComputer(c);
+    card.querySelector('[data-a=forget]').onclick = () => { computers.splice(i, 1); saveComputers(); renderComputersButton(); openComputers(); };
+    body.append(card);
+  });
+  const add = document.createElement('div');
+  add.className = 'pc-card';
+  add.innerHTML = `<b>${computers.length ? 'Connect another computer' : 'Connect your Mac'}</b>
+    <ol class="pc-steps"><li>Open <b>Swipe Clean Companion</b> on your Mac. It sits in the menu bar.</li>
+    <li>Keep this phone on the same Wi-Fi.</li><li>Pick your Mac below and type the 6-digit code from its menu.</li></ol>
+    <div id="pcFound"><small>Looking for computers…</small></div>`;
+  body.append(add);
+  try {
+    const { computers: found } = await Lib.discoverComputers();
+    const box = $('pcFound');
+    if (!box) return;
+    box.textContent = '';
+    const fresh = found.filter((f) => !computers.some((c) => c.fp && c.fp === f.fp));
+    if (!fresh.length) {
+      box.innerHTML = `<small>${found.length ? 'Your paired computers are all here.' : 'No computer found. Check that Swipe Clean Companion is running and you’re on the same Wi-Fi.'}</small>`;
+      return;
+    }
+    fresh.forEach((f) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'pc-found';
+      b.textContent = `💻  ${f.name}`;
+      b.onclick = () => askCode(f);
+      box.append(b);
+    });
+  } catch (e) { const box = $('pcFound'); if (box) box.innerHTML = `<small>Couldn’t search the network: ${e.message}</small>`; }
+}
+
+function askCode(f) {
+  const box = $('pcFound');
+  box.innerHTML = `<small>Type the code shown in the menu bar of <b></b></small>
+    <input class="pc-code" id="pcCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" />
+    <div class="pc-actions" style="margin-top:10px"><button class="primary" id="pcPair">Connect</button></div>`;
+  box.querySelector('b').textContent = f.name;
+  const input = $('pcCode');
+  input.focus();
+  const go = async () => {
+    const code = input.value.replace(/\D/g, '');
+    if (code.length !== 6) { toast('The code has 6 digits'); return; }
+    try {
+      const r = await Lib.computerRequest({ host: f.host, port: f.port, path: '/pair', method: 'POST', body: { code, name: phoneName() }, pin: f.fp || '' });
+      if (r.status !== 200) { toast('That code didn’t work. Check the Mac’s menu bar for the current code.'); return; }
+      const { token, name } = JSON.parse(r.text);
+      const fp = f.fp || r.fp;
+      computers.push({ id: fp.slice(0, 12), name: name || f.name, host: f.host, port: f.port, fp, token });
+      saveComputers();
+      renderComputersButton();
+      toast(`Connected to ${name || f.name}`);
+      openComputers();
+    } catch (e) { toast(e.message); }
+  };
+  $('pcPair').onclick = go;
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+}
+
+function setupComputers() {
+  if (!NATIVE) return;
+  renderComputersButton();
+  $('pcBtn').onclick = openComputers;
+  $('pcClose').onclick = () => $('pcSheet').classList.add('hidden');
+  $('pcSheet').addEventListener('click', (e) => { if (e.target.id === 'pcSheet') $('pcSheet').classList.add('hidden'); });
+}
+
 /* ---------- Status changes ---------- */
 
 async function setStatus(p, status) {
@@ -1175,7 +1423,7 @@ function updateSwiperBar() {
 }
 
 function infoText(p) {
-  return [fmtDate(p.taken), isVideo(p) ? fmtDuration(p.duration) : '', fmtBytes(p.size)].filter(Boolean).join(' · ');
+  return [p.remote ? `On ${p.remote.comp.name}` : '', fmtDate(p.taken), isVideo(p) ? fmtDuration(p.duration) : '', fmtBytes(p.size)].filter(Boolean).join(' · ');
 }
 
 function buildCard(p, isTop) {
@@ -1508,6 +1756,7 @@ const pv = {
 };
 
 async function detailUrl(p) {
+  if (p.remote) return isVideo(p) ? null : remoteImage(p, 4096);
   if (NATIVE) {
     if (isVideo(p)) return null;
     try { return await nativeImage(p.id, DETAIL_PX); } catch { return null; }
@@ -1849,6 +2098,12 @@ function pvActions(p) {
     };
     actions.append(b);
   };
+  $('viewerShare').classList.toggle('hidden', !!p.remote);
+  $('viewerSimilar').classList.toggle('hidden', !NATIVE || !!p.remote);
+  if (p.remote) {
+    add(`Move to Trash on ${p.remote.comp.name}`, 'trash', async () => { await deleteMixed([p], { confirmFirst: false }); });
+    return;
+  }
   if (pv.fromSwipe) {
     const decideHere = (status) => async () => { pvSyncDeck(); await decide(status); };
     add('✕ Delete', 'decide trash', decideHere('trash'));
@@ -2189,6 +2444,7 @@ function bind() {
   setupViewerGestures();
   setupSelection();
   setupFindAndShare();
+  setupComputers();
 
   $('restoreAllBtn').onclick = async () => {
     const list = byStatus('trash');

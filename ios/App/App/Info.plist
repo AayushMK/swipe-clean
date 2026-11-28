@@ -28,6 +28,12 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_swipeclean._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Swipe Clean connects to your computer (Swipe Clean Companion) on your home network to find and clean up duplicate photos.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Swipe Clean shows your photos so you can keep or delete them.</string>
 	<key>UIApplicationSceneManifest</key>
