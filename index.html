@@ -76,6 +76,10 @@
         <svg viewBox="0 0 24 24"><rect x="3" y="7" width="11" height="11" rx="2"/><path d="M8 4h11a2 2 0 0 1 2 2v11"/></svg>
         <span><b>Find duplicates</b><small>Copies and near-identical shots</small></span>
       </button>
+      <button type="button" class="tool-btn" id="pcBtn">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>
+        <span><b id="pcTitle">Your computer</b><small id="pcSub">See photos on your Mac and remove copies</small></span>
+      </button>
     </div>
 
     <div class="install-hint hidden" id="installHint">
@@ -194,6 +198,18 @@
         <span>Original quality, nothing shrunk. WhatsApp and email send it as a document; your friend unzips it to get every photo.</span>
       </button>
       <label class="share-check" id="jpegRow"><input type="checkbox" id="shareJpeg" /> <span>Convert iPhone HEIC photos to JPEG (opens on any phone or computer)</span></label>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop hidden" id="pcSheet">
+    <div class="sheet pc-sheet" role="dialog" aria-labelledby="pcSheetTitle">
+      <div class="sheet-head">
+        <h2 id="pcSheetTitle">Your computers</h2>
+        <button type="button" class="icon-btn" id="pcClose" aria-label="Close">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div id="pcBody"></div>
     </div>
   </div>
 

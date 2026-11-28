@@ -399,7 +399,7 @@ html, body, button, .cell, .card { touch-action: manipulation; }
 .share-check.hidden { display: none; }
 
 /* Tools (duplicates) */
-.tools-row { margin-top: 12px; }
+.tools-row { margin-top: 12px; display: grid; gap: 10px; }
 .tool-btn { width: 100%; display: flex; align-items: center; gap: 12px; text-align: left; padding: 12px 14px;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
 .tool-btn svg { width: 24px; height: 24px; flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
@@ -415,3 +415,23 @@ html, body, button, .cell, .card { touch-action: manipulation; }
 /* Swipe card being pinch-zoomed: let the photo grow past the card's edges */
 .card.zooming { overflow: visible; z-index: 5; }
 .card.zooming img, .card.zooming video { position: relative; z-index: 5; }
+
+/* Computers (Swipe Clean Companion) */
+.pc-sheet { display: grid; gap: 12px; }
+.pc-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; padding: 14px; display: grid; gap: 10px; }
+.pc-card b { font-size: 16px; }
+.pc-card small, .pc-note { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.pc-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pc-actions button { padding: 10px 14px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-weight: 600; font-size: 14px; }
+.pc-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pc-actions button.danger { color: var(--trash); }
+.pc-found { width: 100%; text-align: left; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px;
+  background: var(--panel-2); border: 1px solid var(--line); font-weight: 600; }
+.pc-code { font: 600 28px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .3em; text-align: center; padding: 12px;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--text); width: 100%; }
+.pc-steps { margin: 0; padding-left: 20px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.cell .src { position: absolute; left: 4px; bottom: 4px; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 6px;
+  background: rgba(0,0,0,.6); color: #fff; }
+.cell .src.phone { background: var(--accent); }
+.native .tools-row.native-only { display: grid; }
+.viewing .tools-row.native-only { display: none; }
