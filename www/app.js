@@ -1140,8 +1140,8 @@ async function rediscover(comp) {
   return false;
 }
 
-async function pcCall(comp, path, { method = 'GET', body, binary = false } = {}) {
-  const go = () => Lib.computerRequest({ host: comp.host, port: comp.port, path, method, body, token: comp.token, pin: comp.fp, binary });
+async function pcCall(comp, path, { method = 'GET', body, binary = false, timeout = 30 } = {}) {
+  const go = () => Lib.computerRequest({ host: comp.host, port: comp.port, path, method, body, token: comp.token, pin: comp.fp, binary, timeout });
   let r;
   try { r = await go(); } catch (e) {
     if (/identity changed/.test(e?.message || '')) throw e;
@@ -1165,7 +1165,8 @@ function remoteImage(p, size) {
 }
 
 async function loadComputerItems(comp) {
-  const { items } = await pcCall(comp, '/items');
+  // A big Photos library can take a while to list the first time.
+  const { items } = await pcCall(comp, '/items', { timeout: 120 });
   for (const id of [...remoteItems.keys()]) if (id.startsWith(`r:${comp.id}:`)) remoteItems.delete(id);
   for (const it of items) {
     const id = `r:${comp.id}:${it.id}`;
@@ -1243,7 +1244,8 @@ async function deleteMixed(list, { confirmFirst = true } = {}) {
   let moved = 0;
   try {
     for (const [comp, items] of byComp) {
-      const { deleted } = await pcCall(comp, '/trash', { method: 'POST', body: { ids: items.map((p) => p.remote.itemId) } });
+      // Photos-library deletes wait for you to confirm on the Mac.
+      const { deleted } = await pcCall(comp, '/trash', { method: 'POST', body: { ids: items.map((p) => p.remote.itemId) }, timeout: 300 });
       const gone = new Set(deleted);
       items.forEach((p) => { if (gone.has(p.remote.itemId)) { remoteItems.delete(p.id); moved++; } });
     }

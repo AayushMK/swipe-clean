@@ -14,6 +14,20 @@ import CryptoKit
 import ImageIO
 import UniformTypeIdentifiers
 
+// MARK: - Log (companion.log next to the settings; small, for troubleshooting)
+
+enum Log {
+    static let q = DispatchQueue(label: "log")
+    static func write(_ fmt: String, _ args: CVarArg...) {
+        let line = "\(Date()) " + String(format: fmt, arguments: args) + "\n"
+        q.async {
+            let url = Store.shared.dir.appendingPathComponent("companion.log")
+            if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+            else { try? Data(line.utf8).write(to: url) }
+        }
+    }
+}
+
 // MARK: - Settings
 
 struct Config: Codable {
@@ -246,6 +260,9 @@ final class Server {
     }
 
     private func handle(_ c: NWConnection) {
+        c.stateUpdateHandler = { st in
+            if case let .failed(e) = st { Log.write("conn failed: %@", "\(e)") }
+        }
         c.start(queue: .global(qos: .userInitiated))
         receive(c, buffer: Data())
     }
@@ -274,17 +291,32 @@ final class Server {
     }
 
     private func send(_ c: NWConnection, _ status: Int, _ type: String, _ body: Data) {
+        Log.write("reply %d (%d bytes)", status, body.count)
         let reason = [200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found"][status] ?? "OK"
         var head = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         head += ""
         var out = Data(head.utf8); out.append(body)
-        c.send(content: out, completion: .contentProcessed { _ in c.cancel() })
+        // Don't close right after handing the data to macOS: over Wi-Fi it's still on its way
+        // and closing early cuts the reply off. Mark the reply complete, then wait for the phone
+        // to finish reading and hang up (or give up after a minute).
+        c.send(content: out, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { err in
+            if let err = err { Log.write("send failed: %@", "\(err)"); c.cancel(); return }
+            Self.drainUntilClosed(c)
+        })
+        DispatchQueue.global().asyncAfter(deadline: .now() + 60) { if c.state != .cancelled { c.cancel() } }
     }
+    private static func drainUntilClosed(_ c: NWConnection) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 65536) { _, _, done, err in
+            if done || err != nil { c.cancel() } else { drainUntilClosed(c) }
+        }
+    }
+
     private func json(_ c: NWConnection, _ obj: Any, status: Int = 200) {
         send(c, status, "application/json", (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8))
     }
 
     private func route(_ c: NWConnection, method: String, target: String, headers: [String: String], body: Data) {
+        Log.write("request %@ %@", method, String(target.prefix(60)))
         let comps = URLComponents(string: "https://x" + target)
         let path = comps?.path ?? "/"
         let q = Dictionary(uniqueKeysWithValues: (comps?.queryItems ?? []).map { ($0.name, $0.value ?? "") })

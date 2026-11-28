@@ -719,6 +719,7 @@ public class PhotoLibraryPlugin extends Plugin {
         String token = call.getString("token", "");
         boolean binary = Boolean.TRUE.equals(call.getBoolean("binary", false));
         JSObject body = call.getObject("body", null);
+        int timeoutMs = (int) (call.getDouble("timeout", 30.0) * 1000);
         new Thread(() -> {
             final String[] seen = { "" };
             final boolean[] mismatch = { false };
@@ -743,7 +744,7 @@ public class PhotoLibraryPlugin extends Plugin {
                 con.setSSLSocketFactory(ctx.getSocketFactory());
                 con.setHostnameVerifier((x, y) -> true);   // identity is checked by the pinned certificate instead
                 con.setConnectTimeout(8000);
-                con.setReadTimeout(30000);
+                con.setReadTimeout(timeoutMs);
                 con.setRequestMethod(method);
                 if (!token.isEmpty()) con.setRequestProperty("Authorization", "Bearer " + token);
                 if (body != null) {
