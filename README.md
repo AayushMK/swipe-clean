@@ -19,7 +19,7 @@ One codebase (`www/`) ships two ways:
 - Swipe right or ✓ to keep. Swipe left or ✕ to delete. ↶ undoes.
 - **Share** selected photos in original quality (Share, or one .zip that chat apps send untouched as a document; iPhone can convert HEIC to JPEG). Copies are temporary and deleted right after.
 - **Similar photos** (button in the full-size view) and **Find duplicates** (extra copies pre-selected for deleting). Uses an index built on the phone: Apple Vision image fingerprints on iPhone, a small shape/colour fingerprint on Android.
-- **People (beta):** Android uses real face recognition on the phone (OpenCV's YuNet finds faces, SFace recognises them, run with ONNX Runtime). iPhone still uses the rough phase-1 grouping until SFace is converted to Core ML.
+- **People (beta):** real face recognition on the phone. SFace (OpenCV model zoo) turns each aligned face into 128 numbers; faces are grouped by cosine similarity. Android: YuNet finds faces, both run with ONNX Runtime. iPhone: Apple Vision finds faces, SFace runs as Core ML (see `tools/README.md` for the conversion).
 - **Zoom:** pinch the grid to change photos per row; pinch a swipe card to zoom in place; the full-size view zooms to the photo's real pixels.
 - Daily goal (default 100) with progress ring and streak.
 - Reminder (apps): every day, or only on days you take lots of photos (you pick how many and what time). On iPhone the busy-day check uses Background App Refresh, so iOS decides exactly when it runs.

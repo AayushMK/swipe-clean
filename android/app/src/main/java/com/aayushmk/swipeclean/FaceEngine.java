@@ -48,8 +48,8 @@ class FaceEngine {
         env = OrtEnvironment.getEnvironment();
         OrtSession.SessionOptions o = new OrtSession.SessionOptions();
         o.setIntraOpNumThreads(2);
-        det = env.createSession(asset(ctx, "public/models/face_detection_yunet_2023mar.onnx"), o);
-        rec = env.createSession(asset(ctx, "public/models/face_recognition_sface_2021dec_int8.onnx"), o);
+        det = env.createSession(asset(ctx, "models/face_detection_yunet_2023mar.onnx"), o);
+        rec = env.createSession(asset(ctx, "models/face_recognition_sface_2021dec_int8.onnx"), o);
         detIn = det.getInputNames().iterator().next();
         recIn = rec.getInputNames().iterator().next();
         Log.i(TAG, "detector in=" + det.getInputInfo() + " out=" + det.getOutputNames());
