@@ -747,7 +747,21 @@ function rangeEnd() {
   sel.drag = null;
 }
 
+// Photos per row: pinch the grid to change it (2–8), remembered between visits.
+function gridCols() {
+  const v = parseInt($('grid').style.getPropertyValue('--cols'), 10);
+  return v || Math.max(3, Math.round($('grid').clientWidth / 110));
+}
+function setGridCols(n) {
+  n = Math.max(2, Math.min(8, n));
+  if (n === parseInt($('grid').style.getPropertyValue('--cols'), 10)) return;
+  $('grid').style.setProperty('--cols', n);
+  $('grid').classList.add('fixed-cols');
+}
+
 function setupSelection() {
+  const savedCols = parseInt(localStorage.getItem('gridCols'), 10);
+  if (savedCols) setGridCols(savedCols);
   const grid = $('grid');
   $('selectBtn').onclick = () => setSelecting(!sel.on);
   $('selectAllBtn').onclick = () => {
@@ -756,20 +770,22 @@ function setupSelection() {
     renderSelection();
   };
 
-  let mode = null, x0 = 0, y0 = 0, startIdx = null, pressTimer = 0;
+  let mode = null, x0 = 0, y0 = 0, startIdx = null, pressTimer = 0, two = null;
   const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  const spread = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY) || 1;
   const startRangeHere = (i) => { sel.suppressClick = true; rangeBegin(i); };
 
   grid.addEventListener('touchstart', (e) => {
     clearTimeout(pressTimer);
     if (e.touches.length === 1) sel.suppressClick = false;   // a fresh gesture
     if (e.touches.length === 2) {
-      // Two-finger drag: turn on Select and select as the fingers move (iPhone shortcut).
+      // Two fingers: spreading/pinching resizes the grid; sliding together selects (iPhone shortcut).
       e.preventDefault();
+      clearTimeout(pressTimer);
+      if (mode === 'range') rangeEnd();
       const m = mid(e.touches);
-      if (!sel.on) setSelecting(true);
-      mode = 'range';
-      startRangeHere(cellIndexAt(m.x, m.y));
+      two = { m, d: spread(e.touches), cols: gridCols(), idx: cellIndexAt(m.x, m.y) };
+      mode = 'two';
       return;
     }
     if (e.touches.length > 2) return;
@@ -791,6 +807,23 @@ function setupSelection() {
 
   grid.addEventListener('touchmove', (e) => {
     if (!mode) return;
+    if (mode === 'two' && e.touches.length >= 2) {
+      e.preventDefault();
+      const m = mid(e.touches), ratio = spread(e.touches) / two.d;
+      if (Math.abs(ratio - 1) > 0.12) mode = 'pinch';
+      else if (Math.hypot(m.x - two.m.x, m.y - two.m.y) > 16) {
+        if (!sel.on) setSelecting(true);
+        mode = 'range';
+        startRangeHere(two.idx);
+        rangeMove(m.x, m.y);
+      }
+      return;
+    }
+    if (mode === 'pinch' && e.touches.length >= 2) {
+      e.preventDefault();
+      setGridCols(Math.round(two.cols / (spread(e.touches) / two.d)));
+      return;
+    }
     if (mode === 'range') {
       e.preventDefault();
       const p = e.touches.length >= 2 ? mid(e.touches) : { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -812,7 +845,8 @@ function setupSelection() {
 
   const end = (e) => {
     clearTimeout(pressTimer);
-    if (mode === 'range' && e.touches.length) return;   // a finger is still down
+    if ((mode === 'range' || mode === 'pinch' || mode === 'two') && e.touches.length) return;   // a finger is still down
+    if (mode === 'pinch') { localStorage.setItem('gridCols', String(gridCols())); sel.suppressClick = true; }
     if (mode === 'range') rangeEnd();
     mode = null;
   };
@@ -992,7 +1026,7 @@ async function showDuplicates({ refresh = false } = {}) {
 }
 
 async function refreshPeople() {
-  if (!IOS || !(access === 'granted' || access === 'limited')) return renderPeople();
+  if (!NATIVE || !(access === 'granted' || access === 'limited')) return renderPeople();
   try {
     const st = await Lib.indexStatus();
     indexState = { ...st, running: st.running || indexState?.running };
@@ -1003,8 +1037,8 @@ async function refreshPeople() {
 
 function renderPeople() {
   const sec = $('people');
-  sec.classList.toggle('hidden', !IOS || !photos.length);
-  if (!IOS) return;
+  sec.classList.toggle('hidden', !NATIVE || !photos.length);
+  if (!NATIVE) return;
   const body = $('peopleBody');
   const st = indexState || {};
   $('matchPill').classList.toggle('hidden', !people.length);
@@ -1062,7 +1096,7 @@ function setupFindAndShare() {
       if (fill && text) {
         fill.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
         text.textContent = `${done.toLocaleString()} of ${total.toLocaleString()}`;
-      } else if (IOS) renderPeople();
+      } else if (NATIVE) renderPeople();
     });
   }
 }
@@ -1230,7 +1264,7 @@ function renderDeck() {
   if (next) deck.append(buildCard(next, false));
   const card = buildCard(top, true);
   deck.append(card);
-  attachDrag(card);
+  attachDrag(card); attachPinch(card);
   // warm the cache for the one after
   const after = swipe.queue[swipe.index + 2];
   if (after && !isVideo(after)) fullUrl(after);
@@ -1278,6 +1312,46 @@ function onDrag(el, { start, move, end }, capture = false) {
   }
 }
 
+// Pinch a swipe card to zoom into the photo right there; it springs back when you let go.
+function attachPinch(card) {
+  let p0 = null, el = null;
+  const geo = (ts) => ({
+    d: Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY),
+    x: (ts[0].clientX + ts[1].clientX) / 2, y: (ts[0].clientY + ts[1].clientY) / 2,
+  });
+  card.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 2) return;
+    el = card.querySelector('video') || card.querySelector('img');
+    if (!el) return;
+    const g = geo(e.touches), r = el.getBoundingClientRect();
+    p0 = g;
+    card.pinching = true; card.pinched = true;
+    card.style.transition = 'none'; card.style.transform = '';
+    card.querySelectorAll('.stamp').forEach((s) => { s.style.opacity = 0; });
+    card.classList.add('zooming');
+    el.style.transition = 'none';
+    el.style.transformOrigin = `${g.x - r.left}px ${g.y - r.top}px`;
+  }, { passive: true });
+  card.addEventListener('touchmove', (e) => {
+    if (!card.pinching || e.touches.length < 2 || !p0) return;
+    e.preventDefault();
+    const g = geo(e.touches);
+    const s = Math.max(1, Math.min(5, g.d / p0.d));
+    el.style.transform = `translate(${g.x - p0.x}px, ${g.y - p0.y}px) scale(${s})`;
+  }, { passive: false });
+  const finish = (e) => {
+    if (!card.pinching || e.touches.length >= 2) return;
+    card.pinching = false;
+    if (el) {
+      el.style.transition = 'transform .25s cubic-bezier(.2,.8,.2,1)';
+      el.style.transform = '';
+      setTimeout(() => { if (!card.pinching) card.classList.remove('zooming'); }, 260);
+    }
+  };
+  card.addEventListener('touchend', finish);
+  card.addEventListener('touchcancel', finish);
+}
+
 function attachDrag(card) {
   let x0 = 0, y0 = 0, dx = 0, dy = 0, t0 = 0;
   let mode = null;   // decided after a few px: 'side' (keep/delete) or 'down' (back to grid)
@@ -1288,10 +1362,12 @@ function attachDrag(card) {
   onDrag(card, {
     start: (p, e) => {
       if (edgeBack.active || e.__edge) return false;
+      card.pinched = false;
       mode = null; x0 = p.x; y0 = p.y; dx = dy = 0; t0 = performance.now();
       card.style.transition = 'none';
     },
     move: (p) => {
+      if (card.pinching || card.pinched) return;   // two fingers: zooming, not swiping
       dx = p.x - x0; dy = p.y - y0;
       if (!mode && Math.hypot(dx, dy) > 10) mode = dy > Math.abs(dx) ? 'down' : 'side';
       if (mode === 'down') {
@@ -1305,6 +1381,7 @@ function attachDrag(card) {
       trashStamp.style.opacity = Math.max(0, Math.min(1, -dx / 90));
     },
     end: () => {
+      if (card.pinching || card.pinched) { card.style.transform = ''; keepStamp.style.opacity = 0; trashStamp.style.opacity = 0; return; }
       const dt = Math.max(1, performance.now() - t0);
       if (Math.abs(dx) < 8 && Math.abs(dy) < 8 && dt < 400) {
         card.style.transform = '';
